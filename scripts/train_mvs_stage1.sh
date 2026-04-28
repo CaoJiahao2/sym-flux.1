@@ -1,0 +1,11 @@
+GPU_IDS=7 \
+TRAIN_MANIFEST=data/train_samples.jsonl \
+OUTPUT_DIR=outputs/flux_mvs_stage1_v2 \
+NUM_VIEWS=2 \
+RESOLUTION=512 \
+BATCH_SIZE=1 \
+GRAD_ACCUM=8 \
+MAX_STEPS=5000 \
+LR=1e-4 \
+MV_ADAPTER_DIM=512 \
+bash scripts/20_train_flux_mvs_stage1.sh

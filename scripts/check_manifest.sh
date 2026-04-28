@@ -1,0 +1,1 @@
+bash scripts/02_check_manifest.sh
