@@ -1,7 +1,7 @@
-GPU_IDS=7 \
-TRAIN_MANIFEST=data/train_samples.jsonl \
-OUTPUT_DIR=outputs/flux_mvs_stage1_v2 \
-NUM_VIEWS=2 \
+GPU_IDS=2 \
+TRAIN_MANIFEST=data/stride_10_angle_30_train_samples.jsonl \
+OUTPUT_DIR=outputs/flux_mvs_stage1_num_view4 \
+NUM_VIEWS=4 \
 RESOLUTION=512 \
 BATCH_SIZE=1 \
 GRAD_ACCUM=8 \

@@ -1,0 +1,12 @@
+GPU_IDS=1 \
+TRAIN_MANIFEST=data/train_samples_angle_60.jsonl \
+OUTPUT_DIR=outputs/flux_mvs_stage2_v1 \
+NUM_VIEWS=6 \
+RESOLUTION=512 \
+BATCH_SIZE=1 \
+GRAD_ACCUM=8 \
+MAX_STEPS=20000 \
+LR=1e-4 \
+MV_ADAPTER_DIM=512 \
+RESUME_MV_CKPT=outputs/flux_mvs_stage1_v1/mv_adapter_last.pt \
+bash scripts/21_train_flux_mvs_stage2.sh

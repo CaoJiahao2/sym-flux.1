@@ -1,1 +1,0 @@
-bash scripts/00_check_data.sh

@@ -4,9 +4,9 @@ set -euo pipefail
 # Run from project root: bash scripts/02_check_manifest.sh
 # Checks one manifest item and verifies dataloader shapes.
 
-MANIFEST="${MANIFEST:-data/train_samples.jsonl}"
+MANIFEST="${MANIFEST:-data/stride_10_angle_15_train_samples.jsonl}"
 RESOLUTION="${RESOLUTION:-512}"
-NUM_VIEWS="${NUM_VIEWS:-4}"
+NUM_VIEWS="${NUM_VIEWS:-10}"
 
 python - <<PY
 from src.data.syncam_dataset import SynCamImageGroupDataset, collate_fn

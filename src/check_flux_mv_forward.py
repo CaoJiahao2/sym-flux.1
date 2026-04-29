@@ -17,7 +17,7 @@ def main():
     p.add_argument("--hf_download", action="store_true")
     args = p.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16
     model = load_multiview_flux(
         name=args.model_name,

@@ -133,7 +133,8 @@ def main():
             if global_step >= args.max_steps:
                 break
 
-            pixel_values = batch["pixel_values"].to(device=device, dtype=dtype, non_blocking=True)
+            # pixel_values = batch["pixel_values"].to(device=device, dtype=dtype, non_blocking=True)
+            pixel_values = batch["pixel_values"].to(device=device, dtype=torch.float32, non_blocking=True)
             cameras = batch["cameras"].to(device=device, dtype=dtype, non_blocking=True)
             prompts = batch["prompts"]
 
@@ -143,7 +144,8 @@ def main():
             prompts_expanded = expand_prompts_for_views(prompts, v)
 
             with torch.no_grad():
-                latents = ae.encode(pixel_values)
+                # latents = ae.encode(pixel_values)
+                latents = ae.encode(pixel_values).to(dtype=dtype)
                 noise = shared_view_noise_like(latents, num_views=v, share_ratio=args.noise_share_ratio)
                 t = sample_flow_timesteps(b * v, device=device, dtype=dtype)
                 t_img = t.view(-1, 1, 1, 1)

@@ -144,7 +144,7 @@ def main():
         img = img + (float(t_prev) - float(t_curr)) * pred
 
     latents = unpack_latents(img, latent_h, latent_w)
-    out = ae.decode(latents)
+    out = ae.decode(latents.float())
     labels = [f"view {i+1}" for i in range(args.num_views)]
     grid = tensor_to_pil_grid(out, labels=labels)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
