@@ -7,6 +7,7 @@ set -euo pipefail
 
 source scripts/00_local_flux_env.sh
 export PYTHONPATH="$(pwd):$(pwd)/src:${PYTHONPATH:-}"
+export CUDA_VISIBLE_DEVICES="${GPU_IDS:-0}"
 
 HF_FLAG=""
 if [[ "${HF_DOWNLOAD}" == "1" ]]; then
