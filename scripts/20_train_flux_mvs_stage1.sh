@@ -26,6 +26,7 @@ python src/train_flux_multiview.py \
   --learning_rate "${LR:-1e-4}" \
   --mixed_precision "${MIXED_PRECISION:-bf16}" \
   --guidance "${GUIDANCE:-3.5}" \
+  --mv_attn_mode full_view \
   --mv_adapter_dim "${MV_ADAPTER_DIM:-512}" \
   --noise_share_ratio "${NOISE_SHARE_RATIO:-0.75}" \
   --gradient_checkpointing \

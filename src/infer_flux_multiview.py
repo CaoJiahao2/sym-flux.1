@@ -35,6 +35,12 @@ def parse_args():
     p.add_argument("--inject_single_blocks", action="store_true")
     p.add_argument("--hf_download", action="store_true")
     p.add_argument("--out", default="outputs/flux_mv_demo.jpg")
+    p.add_argument(
+        "--mv_attn_mode",
+        choices=["same_token", "full_view"],
+        default="full_view",
+    )
+    p.add_argument("--no_mv_timestep_modulation", action="store_true")
     return p.parse_args()
 
 
@@ -118,6 +124,8 @@ def main():
         mv_adapter_dim=args.mv_adapter_dim,
         inject_single_blocks=args.inject_single_blocks,
         mv_ckpt=args.mv_ckpt,
+        mv_attn_mode=args.mv_attn_mode,
+        mv_use_timestep_modulation=not args.no_mv_timestep_modulation,
     ).eval()
 
     x = make_noise(args.num_views, args.height, args.width, device, dtype, args.seed)

@@ -86,6 +86,8 @@ def load_multiview_flux(
     mv_adapter_dim: int = 512,
     mv_dropout: float = 0.0,
     inject_single_blocks: bool = False,
+    mv_attn_mode: str = "same_token",
+    mv_use_timestep_modulation: bool = True,
     mv_ckpt: str | None = None,
 ) -> FluxMultiView:
     spec = configs[name]
@@ -94,6 +96,8 @@ def load_multiview_flux(
         mv_adapter_dim=mv_adapter_dim,
         mv_dropout=mv_dropout,
         inject_single_blocks=inject_single_blocks,
+        mv_attn_mode=mv_attn_mode,
+        mv_use_timestep_modulation=mv_use_timestep_modulation,
     ).to(dtype=dtype)
 
     ckpt_path = resolve_flux_checkpoint(name, hf_download=hf_download)

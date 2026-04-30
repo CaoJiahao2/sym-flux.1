@@ -7,14 +7,13 @@ set -euo pipefail
 DATASET_ROOT="${DATASET_ROOT:-data/SynCamVideo-Dataset}"
 APERTURE="${APERTURE:-f24_aperture5}"
 FRAME_STRIDE="${FRAME_STRIDE:-8}"
-CONVENTION="${CONVENTION:-w2c}"
 NUM_VIEWS="${NUM_VIEWS:-0}"          # 0 means keep cam01-cam10 if available
 MAX_ANGLE="${MAX_ANGLE:-}"           # empty means no angle filter
 MAX_TRAIN_SCENES="${MAX_TRAIN_SCENES:-0}"  # 0 means all scenes
 MAX_VAL_SCENES="${MAX_VAL_SCENES:-0}"      # 0 means all scenes
 SAMPLING="${SAMPLING:-first}"
-OUT_BASE="${OUT_BASE:-data/stride_10_angle_30}"
 SEED="${SEED:-1234}"
+OUT_BASE="data/samples/stride_${FRAME_STRIDE}_angle_${MAX_ANGLE:-all}_v${NUM_VIEWS}"
 
 mkdir -p data outputs
 
@@ -40,7 +39,6 @@ COMMON_ARGS=(
   --num_views "${NUM_VIEWS}"
   --sampling "${SAMPLING}"
   --seed "${SEED}"
-  --convention "${CONVENTION}"
 )
 
 if [[ -n "${MAX_ANGLE}" ]]; then

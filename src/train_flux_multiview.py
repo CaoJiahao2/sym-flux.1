@@ -55,6 +55,16 @@ def parse_args():
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--hf_download", action="store_true")
     p.add_argument("--resume_mv_ckpt", default=None, help="Optional adapter checkpoint to continue training from.")
+    p.add_argument(
+        "--mv_attn_mode",
+        choices=["same_token", "full_view"],
+        default="same_token",
+    )
+    p.add_argument(
+        "--no_mv_timestep_modulation",
+        action="store_true",
+        help="Disable timestep-conditioned modulation/gate in MVS blocks.",
+    )
     return p.parse_args()
 
 
@@ -90,6 +100,8 @@ def main():
         mv_adapter_dim=args.mv_adapter_dim,
         mv_dropout=args.mv_dropout,
         inject_single_blocks=args.inject_single_blocks,
+        mv_attn_mode=args.mv_attn_mode,
+        mv_use_timestep_modulation=not args.no_mv_timestep_modulation,
         mv_ckpt=args.resume_mv_ckpt,
     )
     model.freeze_base_model()
@@ -123,39 +135,78 @@ def main():
         eps=1e-8,
     )
 
-    global_step = 0
+    micro_step = 0
+    optim_step = 0
     running_loss = 0.0
+    running_count = 0
+
     optimizer.zero_grad(set_to_none=True)
     pbar = tqdm(total=args.max_steps)
 
-    while global_step < args.max_steps:
+    while optim_step < args.max_steps:
         for batch in loader:
-            if global_step >= args.max_steps:
+            if optim_step >= args.max_steps:
                 break
 
-            # pixel_values = batch["pixel_values"].to(device=device, dtype=dtype, non_blocking=True)
-            pixel_values = batch["pixel_values"].to(device=device, dtype=torch.float32, non_blocking=True)
-            cameras = batch["cameras"].to(device=device, dtype=dtype, non_blocking=True)
+            pixel_values = batch["pixel_values"].to(
+                device=device,
+                dtype=torch.float32,
+                non_blocking=True,
+            )
+            cameras = batch["cameras"].to(
+                device=device,
+                dtype=dtype,
+                non_blocking=True,
+            )
             prompts = batch["prompts"]
 
             b, v, c, h, w = pixel_values.shape
             assert v == args.num_views, f"Dataset returned V={v}, expected {args.num_views}"
+
             pixel_values = pixel_values.reshape(b * v, c, h, w)
             prompts_expanded = expand_prompts_for_views(prompts, v)
 
             with torch.no_grad():
-                # latents = ae.encode(pixel_values)
                 latents = ae.encode(pixel_values).to(dtype=dtype)
-                noise = shared_view_noise_like(latents, num_views=v, share_ratio=args.noise_share_ratio)
-                t = sample_flow_timesteps(b * v, device=device, dtype=dtype)
-                t_img = t.view(-1, 1, 1, 1)
+
+                noise = shared_view_noise_like(
+                    latents,
+                    num_views=v,
+                    share_ratio=args.noise_share_ratio,
+                )
+
+                # Critical: same timestep for all views of the same scene.
+                t_scene = sample_flow_timesteps(b, device=device, dtype=dtype)
+                t = t_scene.repeat_interleave(v)
+                t_img = t.reshape(-1, 1, 1, 1)
+
                 noisy_latents = (1.0 - t_img) * latents + t_img * noise
 
                 img = pack_latents(noisy_latents)
                 target = pack_latents(noise - latents)
-                img_ids = make_img_ids(b * v, noisy_latents.shape[-2], noisy_latents.shape[-1], device, dtype)
-                txt, txt_ids, y = encode_prompts(t5, clip, prompts_expanded, device, dtype)
-                guidance = torch.full((b * v,), args.guidance, device=device, dtype=dtype)
+
+                img_ids = make_img_ids(
+                    b * v,
+                    noisy_latents.shape[-2],
+                    noisy_latents.shape[-1],
+                    device,
+                    dtype,
+                )
+
+                txt, txt_ids, y = encode_prompts(
+                    t5,
+                    clip,
+                    prompts_expanded,
+                    device,
+                    dtype,
+                )
+
+                guidance = torch.full(
+                    (b * v,),
+                    args.guidance,
+                    device=device,
+                    dtype=dtype,
+                )
 
             pred = model(
                 img=img,
@@ -168,38 +219,58 @@ def main():
                 cameras=cameras,
                 num_views=v,
             )
-            loss = F.mse_loss(pred.float(), target.float()) / args.grad_accum
+
+            loss_raw = F.mse_loss(pred.float(), target.float())
+            loss = loss_raw / args.grad_accum
             loss.backward()
 
-            running_loss += float(loss.detach().cpu()) * args.grad_accum
-            if (global_step + 1) % args.grad_accum == 0:
-                torch.nn.utils.clip_grad_norm_(list(model.trainable_parameters()), 1.0)
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
+            micro_step += 1
+            running_loss += float(loss_raw.detach().cpu())
+            running_count += 1
 
-            if global_step % args.log_every == 0:
-                avg = running_loss / max(1, args.log_every)
-                tqdm.write(f"step={global_step} loss={avg:.6f}")
+            if micro_step % args.grad_accum != 0:
+                continue
+
+            torch.nn.utils.clip_grad_norm_(list(model.trainable_parameters()), 1.0)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+
+            optim_step += 1
+            pbar.update(1)
+
+            if optim_step % args.log_every == 0:
+                avg = running_loss / max(1, running_count)
+                tqdm.write(
+                    f"optim_step={optim_step} micro_step={micro_step} "
+                    f"loss={avg:.6f}"
+                )
                 running_loss = 0.0
+                running_count = 0
 
-            if global_step > 0 and global_step % args.save_every == 0:
-                save_path = Path(args.output_dir) / f"mv_adapter_step_{global_step}.pt"
+            if optim_step > 0 and optim_step % args.save_every == 0:
+                save_path = Path(args.output_dir) / f"mv_adapter_step_{optim_step}.pt"
                 torch.save(
                     {
                         "state_dict": extract_mv_state_dict(model),
                         "args": vars(args),
-                        "global_step": global_step,
+                        "global_step": optim_step,
+                        "optim_step": optim_step,
+                        "micro_step": micro_step,
                     },
                     save_path,
                 )
                 tqdm.write(f"Saved {save_path}")
 
-            global_step += 1
-            pbar.update(1)
 
     final_path = Path(args.output_dir) / "mv_adapter_last.pt"
     torch.save(
-        {"state_dict": extract_mv_state_dict(model), "args": vars(args), "global_step": global_step},
+        {
+            "state_dict": extract_mv_state_dict(model),
+            "args": vars(args),
+            "global_step": optim_step,
+            "optim_step": optim_step,
+            "micro_step": micro_step,
+        },
         final_path,
     )
     print(f"Saved final adapter: {final_path}")

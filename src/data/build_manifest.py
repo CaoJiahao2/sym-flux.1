@@ -14,15 +14,24 @@ import sys
 from pathlib import Path
 from typing import Dict, List
 
+# 导入 tqdm 用于显示进度条
+try:
+    from tqdm import tqdm
+except ImportError:
+    # 如果用户没安装 tqdm，则定义一个简单的 placeholder 避免报错
+    def tqdm(iterable, **kwargs):
+        return iterable
+
 # Allow running both as `python src/data/build_manifest.py` and as module.
 _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-from camera_utils import (  # noqa: E402
+from camera_utils import (
     load_scene_extrinsics,
     max_pairwise_rotation_angle_deg,
-    normalize_extrinsics_to_anchor,
+    normalize_extrinsics_syncam,
+    raw_extrinsic_to_syncam_c2w,
 )
 
 
@@ -62,10 +71,7 @@ def select_views(
     rng: random.Random,
     sampling: str,
 ) -> List[str] | None:
-    """Select a camera group from the available cameras.
-
-    If num_views <= 0 or num_views >= number of cameras, return all cameras.
-    """
+    """Select a camera group from the available cameras."""
     if num_views <= 0 or num_views >= len(all_cams):
         return list(all_cams)
 
@@ -108,14 +114,16 @@ def build_manifest(args: argparse.Namespace) -> None:
     if args.cams.strip():
         cam_filter = [c.strip() for c in args.cams.split(",") if c.strip()]
 
+    print(f"Building manifest for {len(scenes)} scenes...")
+    
     with out_path.open("w", encoding="utf-8") as fout:
-        for scene_dir in scenes:
+        # 在这里加入 tqdm 进度条
+        for scene_dir in tqdm(scenes, desc="Processing Scenes", unit="scene"):
             scene_id = scene_dir.name
             camera_json = scene_dir / "cameras" / "camera_extrinsics.json"
             video_dir = scene_dir / "videos"
 
             if not camera_json.exists():
-                print(f"[WARN] missing camera json: {camera_json}")
                 skipped += 1
                 continue
 
@@ -135,16 +143,20 @@ def build_manifest(args: argparse.Namespace) -> None:
                 if cam_filter is not None:
                     all_cams = [c for c in cam_filter if c in cam_dict]
 
-                # Keep only cameras that have corresponding mp4 files.
                 all_cams = [c for c in all_cams if (video_dir / f"{c}.mp4").exists()]
 
                 if len(all_cams) == 0:
                     skipped += 1
                     continue
 
+                syncam_c2w_by_cam = {
+                    cam: raw_extrinsic_to_syncam_c2w(cam_dict[cam])
+                    for cam in all_cams
+                }
+
                 selected_cams = select_views(
                     all_cams=all_cams,
-                    all_mats=cam_dict,
+                    all_mats=syncam_c2w_by_cam,
                     num_views=args.num_views,
                     max_angle=args.max_angle,
                     rng=rng,
@@ -154,13 +166,15 @@ def build_manifest(args: argparse.Namespace) -> None:
                     skipped += 1
                     continue
 
-                selected_mats = [cam_dict[c] for c in selected_cams]
-                rel_extrinsics = normalize_extrinsics_to_anchor(
-                    selected_mats,
+                selected_raw_mats = [cam_dict[c] for c in selected_cams]
+                selected_c2ws = [syncam_c2w_by_cam[c] for c in selected_cams]
+
+                rel_extrinsics = normalize_extrinsics_syncam(
+                    selected_raw_mats,
                     anchor_index=0,
-                    convention=args.convention,
                 )
-                angle_max = max_pairwise_rotation_angle_deg(selected_mats)
+
+                angle_max = max_pairwise_rotation_angle_deg(selected_c2ws)
 
                 item = {
                     "dataset_root": str(dataset_root),
@@ -172,7 +186,6 @@ def build_manifest(args: argparse.Namespace) -> None:
                     "cams": selected_cams,
                     "videos": [str(video_dir / f"{c}.mp4") for c in selected_cams],
                     "extrinsics": rel_extrinsics.astype(float).tolist(),
-                    "extrinsics_convention": args.convention,
                     "anchor_cam": selected_cams[0],
                     "max_pairwise_rotation_deg": angle_max,
                     "prompt": prompt,
@@ -180,7 +193,7 @@ def build_manifest(args: argparse.Namespace) -> None:
                 fout.write(json.dumps(item, ensure_ascii=False) + "\n")
                 total += 1
 
-    print(f"[OK] wrote manifest: {out_path}")
+    print(f"\n[OK] wrote manifest: {out_path}")
     print(f"[OK] samples: {total}; skipped: {skipped}; scenes considered: {len(scenes)}")
 
 
@@ -198,7 +211,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_angle", type=float, default=None, help="Optional max pairwise rotation angle in degrees")
     parser.add_argument("--sampling", type=str, default="first", choices=["first", "random"])
     parser.add_argument("--seed", type=int, default=1234)
-    parser.add_argument("--convention", type=str, default="w2c", choices=["w2c", "c2w", "none"])
     return parser.parse_args()
 
 

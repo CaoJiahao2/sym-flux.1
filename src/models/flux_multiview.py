@@ -27,10 +27,14 @@ class FluxMultiView(Flux):
         mv_adapter_dim: int = 512,
         mv_dropout: float = 0.0,
         inject_single_blocks: bool = False,
+        mv_attn_mode: str = "same_token",
+        mv_use_timestep_modulation: bool = True,
     ) -> None:
         super().__init__(params)
         self.inject_single_blocks = inject_single_blocks
         self._gradient_checkpointing = False
+        self.mv_attn_mode = mv_attn_mode
+        self.mv_use_timestep_modulation = mv_use_timestep_modulation
 
         self.mv_double_blocks = nn.ModuleList([
             MultiViewSyncBlock(
@@ -38,6 +42,8 @@ class FluxMultiView(Flux):
                 num_heads=params.num_heads,
                 adapter_dim=mv_adapter_dim,
                 dropout=mv_dropout,
+                attn_mode=mv_attn_mode,
+                use_timestep_modulation=mv_use_timestep_modulation,
             )
             for _ in range(params.depth)
         ])
@@ -123,7 +129,7 @@ class FluxMultiView(Flux):
             else:
                 img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
             if cameras is not None and num_views > 1:
-                img = self.mv_double_blocks[i](img, cameras=cameras, num_views=num_views)
+                img = self.mv_double_blocks[i](img, cameras=cameras, num_views=num_views, vec=vec)
 
         txt_len = txt.shape[1]
         img = torch.cat((txt, img), 1)
@@ -136,7 +142,12 @@ class FluxMultiView(Flux):
 
             if self.inject_single_blocks and cameras is not None and num_views > 1:
                 txt_part, img_part = img[:, :txt_len, :], img[:, txt_len:, :]
-                img_part = self.mv_single_blocks[i](img_part, cameras=cameras, num_views=num_views)
+                img_part = self.mv_single_blocks[i](
+                    img_part,
+                    cameras=cameras,
+                    num_views=num_views,
+                    vec=vec,
+                )
                 img = torch.cat((txt_part, img_part), dim=1)
 
         img = img[:, txt_len:, ...]
