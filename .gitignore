@@ -231,4 +231,7 @@ $RECYCLE.BIN/
 
 outputs/
 test/album
-data/
+data/SynCamVideo-Dataset
+data/scene_previews
+*.json
+*.jsonl
