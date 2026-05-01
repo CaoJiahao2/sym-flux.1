@@ -27,7 +27,7 @@ RESUME_ARGS=()
 if [[ -n "${RESUME_MV_CKPT:-}" ]]; then
   RESUME_ARGS+=(--resume_mv_ckpt "${RESUME_MV_CKPT}")
 fi
-
+  # 训练时过度共享噪声，可能会让模型学成“多张图尽量一样”，削弱视角变化,noise_share_ratio = 0.0 或很小
 python src/train_flux_multiview.py \
   --model_name "${MODEL_NAME}" \
   --train_manifest "${TRAIN_MANIFEST:-data/train_samples.jsonl}" \
@@ -44,8 +44,7 @@ python src/train_flux_multiview.py \
   --mv_adapter_dim "${MV_ADAPTER_DIM:-512}" \
   --mv_attn_mode "${MV_ATTN_MODE:-same_token}" \
   --single_block_stride "${SINGLE_BLOCK_STRIDE:-4}" \
-  # 训练时过度共享噪声，可能会让模型学成“多张图尽量一样”，削弱视角变化,noise_share_ratio = 0.0 或很小
-  --noise_share_ratio "${NOISE_SHARE_RATIO:-0.0}" \ 
+  --noise_share_ratio "${NOISE_SHARE_RATIO:-0.0}" \
   --gradient_checkpointing \
   --save_every "${SAVE_EVERY:-1000}" \
   "${RESUME_ARGS[@]}" \
