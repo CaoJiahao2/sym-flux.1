@@ -271,7 +271,7 @@ data/samples/stride_8_angle_30-60_v4_val_samples.jsonl
 DATASET_ROOT=data/SynCamVideo-Dataset \
 NUM_VIEWS=4 \
 MAX_TRAIN_SCENES=50 \
-MAX_VAL_SCENES=10 \
+MAX_VAL_SCENES=1 \
 bash scripts/full_view/10_build_manifests_full_view_angles.sh
 ```
 
@@ -329,7 +329,7 @@ SEQ_LEN=1024 \
 bash scripts/full_view/00_check_forward_full_view.sh
 ```
 
-注意：`full_hidden` 显存消耗远高于 `adapter`。
+注意：`full_hidden` 显存消耗远高于 `adapter`。单张48GB的4090显卡会暴显存。
 
 ---
 
@@ -343,7 +343,7 @@ MV_ARCH=adapter \
 MAX_STEPS=10 \
 SAVE_EVERY=10 \
 MAX_TRAIN_SCENES=50 \
-MAX_VAL_SCENES=10 \
+MAX_VAL_SCENES=1 \
 bash scripts/full_view/20_train_full_view_0_30.sh
 ```
 

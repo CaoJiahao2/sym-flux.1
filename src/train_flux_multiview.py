@@ -63,7 +63,8 @@ def parse_args():
     p.add_argument("--mv_dropout", type=float, default=0.0)
     p.add_argument("--mv_attn_mode", choices=["same_token", "full_view"], default="full_view")
     p.add_argument("--no_mv_timestep_modulation", action="store_true")
-    p.add_argument("--inject_single_blocks", action="store_true")
+    p.add_argument("--inject_single_blocks", dest="inject_single_blocks", action="store_true", default=True)
+    p.add_argument("--no_inject_single_blocks", dest="inject_single_blocks", action="store_false")
     p.add_argument("--single_block_stride", type=int, default=4)
     p.add_argument("--gradient_checkpointing", action="store_true")
 
@@ -75,7 +76,7 @@ def parse_args():
     # Pseudo general-image regularization: copy one view V times and set all
     # camera extrinsics to identity. This prevents MVS adapters from overfitting
     # to multi-view synchronization at the cost of base FLUX visual quality.
-    p.add_argument("--pseudo_general_prob", type=float, default=0.15,
+    p.add_argument("--pseudo_general_prob", type=float, default=0.25,
                    help="Probability per micro-batch to use copied-view identity-camera regularization.")
     p.add_argument("--pseudo_general_random_view", action="store_true",
                    help="Randomly choose copied source view. Otherwise use anchor view 0.")

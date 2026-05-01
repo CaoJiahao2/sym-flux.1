@@ -9,9 +9,9 @@ if [[ "${HF_DOWNLOAD:-0}" == "1" ]]; then
   HF_FLAG="--hf_download"
 fi
 
-SINGLE_FLAG=""
-if [[ "${INJECT_SINGLE_BLOCKS:-0}" == "1" ]]; then
-  SINGLE_FLAG="--inject_single_blocks"
+SINGLE_FLAG="--inject_single_blocks"
+if [[ "${INJECT_SINGLE_BLOCKS:-1}" == "0" ]]; then
+  SINGLE_FLAG="--no_inject_single_blocks"
 fi
 
 NO_MV_MOD_FLAG=""

@@ -23,7 +23,7 @@ class FluxMultiView(Flux):
         params: FluxParams,
         mv_adapter_dim: int = 512,
         mv_dropout: float = 0.0,
-        inject_single_blocks: bool = False,
+        inject_single_blocks: bool = True,
         single_block_stride: int = 4,
         mv_attn_mode: str = "full_view",
         mv_use_timestep_modulation: bool = True,

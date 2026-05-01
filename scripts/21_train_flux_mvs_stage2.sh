@@ -12,9 +12,9 @@ if [[ "${HF_DOWNLOAD:-0}" == "1" ]]; then
   HF_FLAG="--hf_download"
 fi
 
-SINGLE_FLAG=""
-if [[ "${INJECT_SINGLE_BLOCKS:-0}" == "1" ]]; then
-  SINGLE_FLAG="--inject_single_blocks"
+SINGLE_FLAG="--inject_single_blocks"
+if [[ "${INJECT_SINGLE_BLOCKS:-1}" == "0" ]]; then
+  SINGLE_FLAG="--no_inject_single_blocks"
 fi
 
 NO_MV_MOD_FLAG=""
@@ -62,7 +62,7 @@ python src/train_flux_multiview.py \
   --mv_adapter_dim "${MV_ADAPTER_DIM:-512}" \
   --mv_attn_mode "${MV_ATTN_MODE:-full_view}" \
   --single_block_stride "${SINGLE_BLOCK_STRIDE:-4}" \
-  --pseudo_general_prob "${PSEUDO_GENERAL_PROB:-0.15}" \
+  --pseudo_general_prob "${PSEUDO_GENERAL_PROB:-0.25}" \
   --infer_sample_index "${INFER_SAMPLE_INDEX:-0}" \
   --infer_num_steps "${INFER_NUM_STEPS:-30}" \
   --infer_seed "${INFER_SEED:-42}" \
