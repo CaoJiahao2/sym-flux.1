@@ -14,3 +14,6 @@ manifest 单行格式,生成的每一行大致是：
   "max_pairwise_rotation_deg": 123.45,
   "prompt": "a realistic 3D-rendered scene with a character performing an action"
 }
+
+conda activate flux_env
+cd data/aigc/flux

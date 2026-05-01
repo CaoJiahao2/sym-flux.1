@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import time
 from pathlib import Path
 
 import torch
@@ -11,8 +9,6 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-# motified
-# from flux.util import load_ae, load_clip, load_t5
 from flux.util import load_ae
 from src.local_text_encoders import load_local_text_encoders
 
@@ -39,7 +35,7 @@ def parse_args():
     p.add_argument("--num_views", type=int, default=2)
     p.add_argument("--batch_size", type=int, default=1)
     p.add_argument("--num_workers", type=int, default=4)
-    p.add_argument("--max_steps", type=int, default=1000)
+    p.add_argument("--max_steps", type=int, default=1000, help="Number of optimizer steps, not micro-steps.")
     p.add_argument("--learning_rate", type=float, default=1e-4)
     p.add_argument("--weight_decay", type=float, default=0.0)
     p.add_argument("--grad_accum", type=int, default=1)
@@ -47,7 +43,10 @@ def parse_args():
     p.add_argument("--guidance", type=float, default=3.5)
     p.add_argument("--mv_adapter_dim", type=int, default=512)
     p.add_argument("--mv_dropout", type=float, default=0.0)
+    p.add_argument("--mv_attn_mode", choices=["same_token", "full_view"], default="same_token")
+    p.add_argument("--no_mv_timestep_modulation", action="store_true")
     p.add_argument("--inject_single_blocks", action="store_true")
+    p.add_argument("--single_block_stride", type=int, default=4)
     p.add_argument("--gradient_checkpointing", action="store_true")
     p.add_argument("--noise_share_ratio", type=float, default=0.75)
     p.add_argument("--save_every", type=int, default=500)
@@ -55,16 +54,6 @@ def parse_args():
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--hf_download", action="store_true")
     p.add_argument("--resume_mv_ckpt", default=None, help="Optional adapter checkpoint to continue training from.")
-    p.add_argument(
-        "--mv_attn_mode",
-        choices=["same_token", "full_view"],
-        default="same_token",
-    )
-    p.add_argument(
-        "--no_mv_timestep_modulation",
-        action="store_true",
-        help="Disable timestep-conditioned modulation/gate in MVS blocks.",
-    )
     return p.parse_args()
 
 
@@ -90,7 +79,7 @@ def main():
         ae = load_ae(args.model_name, device=device, hf_download=args.hf_download).eval().requires_grad_(False)
     except TypeError:
         ae = load_ae(args.model_name, device=device).eval().requires_grad_(False)
-    
+
     print("Loading FLUX MultiView transformer")
     model = load_multiview_flux(
         name=args.model_name,
@@ -100,6 +89,7 @@ def main():
         mv_adapter_dim=args.mv_adapter_dim,
         mv_dropout=args.mv_dropout,
         inject_single_blocks=args.inject_single_blocks,
+        single_block_stride=args.single_block_stride,
         mv_attn_mode=args.mv_attn_mode,
         mv_use_timestep_modulation=not args.no_mv_timestep_modulation,
         mv_ckpt=args.resume_mv_ckpt,
@@ -111,6 +101,12 @@ def main():
 
     trainable, total = count_trainable_params(model)
     print(f"Trainable params: {trainable/1e6:.2f}M / total {total/1e9:.2f}B")
+    print(
+        f"MVS config: attn_mode={args.mv_attn_mode}, "
+        f"single_blocks={args.inject_single_blocks}, "
+        f"single_block_stride={args.single_block_stride}, "
+        f"timestep_modulation={not args.no_mv_timestep_modulation}"
+    )
 
     dataset = SynCamImageGroupDataset(
         args.train_manifest,
@@ -139,7 +135,6 @@ def main():
     optim_step = 0
     running_loss = 0.0
     running_count = 0
-
     optimizer.zero_grad(set_to_none=True)
     pbar = tqdm(total=args.max_steps)
 
@@ -162,20 +157,23 @@ def main():
 
             b, v, c, h, w = pixel_values.shape
             assert v == args.num_views, f"Dataset returned V={v}, expected {args.num_views}"
-
             pixel_values = pixel_values.reshape(b * v, c, h, w)
             prompts_expanded = expand_prompts_for_views(prompts, v)
 
             with torch.no_grad():
                 latents = ae.encode(pixel_values).to(dtype=dtype)
+                # noise = shared_view_noise_like(
+                #     latents,
+                #     num_views=v,
+                #     share_ratio=args.noise_share_ratio,
+                # )
+                # SynCamMaster-style training noise:
+                # - the V views of the same scene share the same timestep,
+                # - but their Gaussian noise is sampled independently.
+                noise = torch.randn_like(latents)
 
-                noise = shared_view_noise_like(
-                    latents,
-                    num_views=v,
-                    share_ratio=args.noise_share_ratio,
-                )
-
-                # Critical: same timestep for all views of the same scene.
+                # Critical fix: all views of the same scene use the same timestep.
+                # Flatten order is [scene0_view0, scene0_view1, ..., scene1_view0, ...].
                 t_scene = sample_flow_timesteps(b, device=device, dtype=dtype)
                 t = t_scene.repeat_interleave(v)
                 t_img = t.reshape(-1, 1, 1, 1)
@@ -184,29 +182,9 @@ def main():
 
                 img = pack_latents(noisy_latents)
                 target = pack_latents(noise - latents)
-
-                img_ids = make_img_ids(
-                    b * v,
-                    noisy_latents.shape[-2],
-                    noisy_latents.shape[-1],
-                    device,
-                    dtype,
-                )
-
-                txt, txt_ids, y = encode_prompts(
-                    t5,
-                    clip,
-                    prompts_expanded,
-                    device,
-                    dtype,
-                )
-
-                guidance = torch.full(
-                    (b * v,),
-                    args.guidance,
-                    device=device,
-                    dtype=dtype,
-                )
+                img_ids = make_img_ids(b * v, noisy_latents.shape[-2], noisy_latents.shape[-1], device, dtype)
+                txt, txt_ids, y = encode_prompts(t5, clip, prompts_expanded, device, dtype)
+                guidance = torch.full((b * v,), args.guidance, device=device, dtype=dtype)
 
             pred = model(
                 img=img,
@@ -219,7 +197,6 @@ def main():
                 cameras=cameras,
                 num_views=v,
             )
-
             loss_raw = F.mse_loss(pred.float(), target.float())
             loss = loss_raw / args.grad_accum
             loss.backward()
@@ -241,8 +218,7 @@ def main():
             if optim_step % args.log_every == 0:
                 avg = running_loss / max(1, running_count)
                 tqdm.write(
-                    f"optim_step={optim_step} micro_step={micro_step} "
-                    f"loss={avg:.6f}"
+                    f"optim_step={optim_step} micro_step={micro_step} loss={avg:.6f}"
                 )
                 running_loss = 0.0
                 running_count = 0
@@ -260,7 +236,6 @@ def main():
                     save_path,
                 )
                 tqdm.write(f"Saved {save_path}")
-
 
     final_path = Path(args.output_dir) / "mv_adapter_last.pt"
     torch.save(

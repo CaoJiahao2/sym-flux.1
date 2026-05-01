@@ -1,26 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
 # 基础参数定义
-GPU_IDS=2
-NUM_VIEWS=2
-MAX_STEPS=1000
-MV_ADAPTER_DIM=1024
-LR=1e-4
-BATCH_SIZE=1
-GRAD_ACCUM=8
+GPU_IDS=${GPU_IDS:-3}
+NUM_VIEWS=${NUM_VIEWS:-2}
+MAX_STEPS=${MAX_STEPS:-5000}
+MV_ADAPTER_DIM=${MV_ADAPTER_DIM:-512}
+MV_ATTN_MODE=${MV_ATTN_MODE:-full_view}
+LR=${LR:-1e-4}
+BATCH_SIZE=${BATCH_SIZE:-1}
+GRAD_ACCUM=${GRAD_ACCUM:-8}
+INJECT_SINGLE_BLOCKS=${INJECT_SINGLE_BLOCKS:-1}
+SINGLE_BLOCK_STRIDE=${SINGLE_BLOCK_STRIDE:-4}
 
 # 动态生成 OUTPUT_DIR
-# 命名规则：outputs/flux_mvs_S{MAX_STEPS}_V{NUM_VIEWS}_D{MV_ADAPTER_DIM}
-OUTPUT_DIR=outputs/flux_mvs_steps${MAX_STEPS}_views${NUM_VIEWS}_dim${MV_ADAPTER_DIM}
+OUTPUT_DIR=${OUTPUT_DIR:-outputs/flux_mvs_steps${MAX_STEPS}_views${NUM_VIEWS}_dim${MV_ADAPTER_DIM}_${MV_ATTN_MODE}}
 
 # 执行训练
+
 GPU_IDS=$GPU_IDS \
-TRAIN_MANIFEST=data/stride_10_angle_15_train_samples.jsonl \
+TRAIN_MANIFEST=${TRAIN_MANIFEST:-data/samples/stride_10_angle_15_v2_train_samples.jsonl} \
 NUM_VIEWS=$NUM_VIEWS \
-RESOLUTION=512 \
+RESOLUTION=${RESOLUTION:-512} \
 BATCH_SIZE=$BATCH_SIZE \
 GRAD_ACCUM=$GRAD_ACCUM \
 MAX_STEPS=$MAX_STEPS \
 LR=$LR \
 MV_ADAPTER_DIM=$MV_ADAPTER_DIM \
+MV_ATTN_MODE=$MV_ATTN_MODE \
+INJECT_SINGLE_BLOCKS=$INJECT_SINGLE_BLOCKS \
+SINGLE_BLOCK_STRIDE=$SINGLE_BLOCK_STRIDE \
 OUTPUT_DIR=$OUTPUT_DIR \
 bash scripts/20_train_flux_mvs_stage1.sh
 
@@ -32,7 +41,7 @@ bash scripts/20_train_flux_mvs_stage1.sh
 # # 执行推理
 # GPU_IDS=$GPU_IDS \
 # MV_CKPT=$MV_CKPT \
-# MANIFEST=data/stride_10_angle_15_val_samples.jsonl \
+# MANIFEST=data/samples/stride_10_angle_15_val_samples.jsonl \
 # SAMPLE_INDEX=0 \
 # NUM_VIEWS=$NUM_VIEWS \
 # OUT=$OUT \

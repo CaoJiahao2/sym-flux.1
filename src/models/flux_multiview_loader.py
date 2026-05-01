@@ -23,20 +23,7 @@ def _first_existing_path(paths: list[str | os.PathLike | None]) -> str | None:
 
 
 def resolve_flux_checkpoint(name: str = "flux-dev", hf_download: bool = False) -> str:
-    """Resolve the FLUX transformer checkpoint path.
-
-    Compatible with both older and newer black-forest-labs/flux util.py versions:
-    - older ModelSpec may expose spec.ckpt_path;
-    - newer ModelSpec may not, so we must use environment variables and repo_flow.
-
-    Priority:
-      1. FLUX_MODEL
-      2. FLUX_DEV for flux-dev / FLUX_SCHNELL for flux-schnell
-      3. spec.ckpt_path if present
-      4. LOCAL_FLUX_DIR / spec.repo_flow
-      5. /data/model_cjh/FLUX.1-dev / spec.repo_flow
-      6. Hugging Face download only when hf_download=True
-    """
+    """Resolve the FLUX transformer checkpoint path."""
     spec = configs[name]
     repo_flow = getattr(spec, "repo_flow", None)
     repo_id = getattr(spec, "repo_id", None)
@@ -57,7 +44,6 @@ def resolve_flux_checkpoint(name: str = "flux-dev", hf_download: bool = False) -
     if local_dir and repo_flow:
         candidates.append(Path(local_dir) / repo_flow)
 
-    # Your current local path. Keeping this as a last local fallback is harmless.
     if repo_flow:
         candidates.append(Path("/data/model_cjh/FLUX.1-dev") / repo_flow)
 
@@ -86,6 +72,7 @@ def load_multiview_flux(
     mv_adapter_dim: int = 512,
     mv_dropout: float = 0.0,
     inject_single_blocks: bool = False,
+    single_block_stride: int = 4,
     mv_attn_mode: str = "same_token",
     mv_use_timestep_modulation: bool = True,
     mv_ckpt: str | None = None,
@@ -96,6 +83,7 @@ def load_multiview_flux(
         mv_adapter_dim=mv_adapter_dim,
         mv_dropout=mv_dropout,
         inject_single_blocks=inject_single_blocks,
+        single_block_stride=single_block_stride,
         mv_attn_mode=mv_attn_mode,
         mv_use_timestep_modulation=mv_use_timestep_modulation,
     ).to(dtype=dtype)
@@ -107,7 +95,6 @@ def load_multiview_flux(
     try:
         missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
     except TypeError:
-        # For older PyTorch without assign=True.
         missing, unexpected = model.load_state_dict(sd, strict=False)
 
     print_load_warning(missing, unexpected)

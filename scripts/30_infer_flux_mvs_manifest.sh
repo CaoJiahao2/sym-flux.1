@@ -1,13 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Generate a horizontal grid from a manifest sample.
-# Example:
-#   GPU_IDS=1 MV_CKPT=outputs/flux_mvs_stage1_v2/mv_adapter_last.pt bash scripts/30_infer_flux_mvs_manifest.sh
-
 source scripts/00_local_flux_env.sh
 export PYTHONPATH="$(pwd):$(pwd)/src:${PYTHONPATH:-}"
-export CUDA_VISIBLE_DEVICES="${GPU_IDS:-0}"
 
 HF_FLAG=""
 if [[ "${HF_DOWNLOAD}" == "1" ]]; then
@@ -19,9 +14,14 @@ if [[ "${INJECT_SINGLE_BLOCKS:-0}" == "1" ]]; then
   SINGLE_FLAG="--inject_single_blocks"
 fi
 
+NO_MV_MOD_FLAG=""
+if [[ "${NO_MV_TIMESTEP_MODULATION:-0}" == "1" ]]; then
+  NO_MV_MOD_FLAG="--no_mv_timestep_modulation"
+fi
+
 python src/infer_flux_multiview.py \
   --model_name "${MODEL_NAME}" \
-  --mv_ckpt "${MV_CKPT:-outputs/flux_mvs_stage1_v2/mv_adapter_last.pt}" \
+  --mv_ckpt "${MV_CKPT}" \
   --manifest "${MANIFEST:-data/val_samples.jsonl}" \
   --sample_index "${SAMPLE_INDEX:-0}" \
   --num_views "${NUM_VIEWS:-4}" \
@@ -31,6 +31,9 @@ python src/infer_flux_multiview.py \
   --guidance "${GUIDANCE:-3.5}" \
   --seed "${SEED:-42}" \
   --mv_adapter_dim "${MV_ADAPTER_DIM:-512}" \
+  --mv_attn_mode "${MV_ATTN_MODE:-same_token}" \
+  --single_block_stride "${SINGLE_BLOCK_STRIDE:-4}" \
   --out "${OUT:-outputs/flux_mv_demo.jpg}" \
   ${SINGLE_FLAG} \
+  ${NO_MV_MOD_FLAG} \
   ${HF_FLAG}

@@ -32,15 +32,12 @@ def parse_args():
     p.add_argument("--guidance", type=float, default=3.5)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--mv_adapter_dim", type=int, default=512)
+    p.add_argument("--mv_attn_mode", choices=["same_token", "full_view"], default="same_token")
+    p.add_argument("--no_mv_timestep_modulation", action="store_true")
     p.add_argument("--inject_single_blocks", action="store_true")
+    p.add_argument("--single_block_stride", type=int, default=4)
     p.add_argument("--hf_download", action="store_true")
     p.add_argument("--out", default="outputs/flux_mv_demo.jpg")
-    p.add_argument(
-        "--mv_attn_mode",
-        choices=["same_token", "full_view"],
-        default="full_view",
-    )
-    p.add_argument("--no_mv_timestep_modulation", action="store_true")
     return p.parse_args()
 
 
@@ -70,19 +67,24 @@ def load_camera_array(args) -> tuple[torch.Tensor, str]:
     raise ValueError("Provide --manifest or --camera_json")
 
 
+# def make_noise(num_views: int, height: int, width: int, device, dtype, seed: int) -> torch.Tensor:
+#     latent_h = 2 * math.ceil(height / 16)
+#     latent_w = 2 * math.ceil(width / 16)
+#     g = torch.Generator(device="cpu").manual_seed(seed)
+#     base = torch.randn((1, 16, latent_h, latent_w), generator=g, dtype=torch.float32)
+#     indep = torch.randn((num_views, 16, latent_h, latent_w), generator=g, dtype=torch.float32)
+#     x = 0.97 * base.repeat(num_views, 1, 1, 1) + 0.03 * indep
+#     return x.to(device=device, dtype=dtype)
 def make_noise(num_views: int, height: int, width: int, device, dtype, seed: int) -> torch.Tensor:
+    """Create independent initial Gaussian noise for each view."""
     latent_h = 2 * math.ceil(height / 16)
     latent_w = 2 * math.ceil(width / 16)
     g = torch.Generator(device="cpu").manual_seed(seed)
-    base = torch.randn((1, 16, latent_h, latent_w), generator=g, dtype=torch.float32)
-    # Inference: mostly shared initialization improves cross-view identity.
-    indep = torch.randn((num_views, 16, latent_h, latent_w), generator=g, dtype=torch.float32)
-    x = 0.97 * base.repeat(num_views, 1, 1, 1) + 0.03 * indep
+    x = torch.randn((num_views, 16, latent_h, latent_w), generator=g, dtype=torch.float32)
     return x.to(device=device, dtype=dtype)
 
 
 def tensor_to_pil_grid(x: torch.Tensor, labels: list[str] | None = None) -> Image.Image:
-    # x: [V,3,H,W], approximately [-1,1]
     x = (x.detach().float().cpu().clamp(-1, 1) + 1) / 2
     imgs = []
     for i in range(x.shape[0]):
@@ -123,9 +125,10 @@ def main():
         hf_download=args.hf_download,
         mv_adapter_dim=args.mv_adapter_dim,
         inject_single_blocks=args.inject_single_blocks,
-        mv_ckpt=args.mv_ckpt,
+        single_block_stride=args.single_block_stride,
         mv_attn_mode=args.mv_attn_mode,
         mv_use_timestep_modulation=not args.no_mv_timestep_modulation,
+        mv_ckpt=args.mv_ckpt,
     ).eval()
 
     x = make_noise(args.num_views, args.height, args.width, device, dtype, args.seed)
@@ -152,7 +155,8 @@ def main():
         img = img + (float(t_prev) - float(t_curr)) * pred
 
     latents = unpack_latents(img, latent_h, latent_w)
-    out = ae.decode(latents.float())
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=(device.type == "cuda")):
+        out = ae.decode(latents.float())
     labels = [f"view {i+1}" for i in range(args.num_views)]
     grid = tensor_to_pil_grid(out, labels=labels)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)

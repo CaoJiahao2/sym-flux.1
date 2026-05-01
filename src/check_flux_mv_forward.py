@@ -14,6 +14,10 @@ def main():
     p.add_argument("--seq_len", type=int, default=256)
     p.add_argument("--txt_len", type=int, default=16)
     p.add_argument("--mv_adapter_dim", type=int, default=128)
+    p.add_argument("--mv_attn_mode", choices=["same_token", "full_view"], default="same_token")
+    p.add_argument("--inject_single_blocks", action="store_true")
+    p.add_argument("--single_block_stride", type=int, default=4)
+    p.add_argument("--no_mv_timestep_modulation", action="store_true")
     p.add_argument("--hf_download", action="store_true")
     args = p.parse_args()
 
@@ -25,13 +29,16 @@ def main():
         dtype=dtype,
         hf_download=args.hf_download,
         mv_adapter_dim=args.mv_adapter_dim,
+        mv_attn_mode=args.mv_attn_mode,
+        inject_single_blocks=args.inject_single_blocks,
+        single_block_stride=args.single_block_stride,
+        mv_use_timestep_modulation=not args.no_mv_timestep_modulation,
     )
     model.freeze_base_model()
     model.eval()
 
     b, v, s = 1, args.num_views, args.seq_len
     img = torch.randn(b * v, s, 64, device=device, dtype=dtype)
-    # fake IDs on a square grid if possible
     side = int(s ** 0.5)
     if side * side == s:
         img_ids = make_img_ids(b * v, side * 2, side * 2, device, dtype)
@@ -48,6 +55,15 @@ def main():
         out = model(img, img_ids, txt, txt_ids, timesteps, y, guidance, cameras=cameras, num_views=v)
     print("forward ok", tuple(out.shape))
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(
+        "mvs config",
+        {
+            "attn_mode": args.mv_attn_mode,
+            "inject_single_blocks": args.inject_single_blocks,
+            "single_block_stride": args.single_block_stride,
+            "timestep_modulation": not args.no_mv_timestep_modulation,
+        },
+    )
     print("trainable params", trainable)
 
 

@@ -1,12 +1,18 @@
-GPU_IDS=1 \
-TRAIN_MANIFEST=data/train_samples_angle_60.jsonl \
-OUTPUT_DIR=outputs/flux_mvs_stage2_v1 \
-NUM_VIEWS=6 \
-RESOLUTION=512 \
-BATCH_SIZE=1 \
-GRAD_ACCUM=8 \
-MAX_STEPS=20000 \
-LR=1e-4 \
-MV_ADAPTER_DIM=512 \
-RESUME_MV_CKPT=outputs/flux_mvs_stage1_v1/mv_adapter_last.pt \
+#!/usr/bin/env bash
+set -euo pipefail
+
+GPU_IDS=${GPU_IDS:-1} \
+TRAIN_MANIFEST=${TRAIN_MANIFEST:-data/train_samples_angle_60.jsonl} \
+OUTPUT_DIR=${OUTPUT_DIR:-outputs/flux_mvs_stage2_v1} \
+NUM_VIEWS=${NUM_VIEWS:-4} \
+RESOLUTION=${RESOLUTION:-512} \
+BATCH_SIZE=${BATCH_SIZE:-1} \
+GRAD_ACCUM=${GRAD_ACCUM:-8} \
+MAX_STEPS=${MAX_STEPS:-20000} \
+LR=${LR:-1e-4} \
+MV_ADAPTER_DIM=${MV_ADAPTER_DIM:-512} \
+MV_ATTN_MODE=${MV_ATTN_MODE:-same_token} \
+INJECT_SINGLE_BLOCKS=${INJECT_SINGLE_BLOCKS:-0} \
+SINGLE_BLOCK_STRIDE=${SINGLE_BLOCK_STRIDE:-4} \
+RESUME_MV_CKPT=${RESUME_MV_CKPT:-} \
 bash scripts/21_train_flux_mvs_stage2.sh
