@@ -73,8 +73,9 @@ def load_multiview_flux(
     mv_dropout: float = 0.0,
     inject_single_blocks: bool = False,
     single_block_stride: int = 4,
-    mv_attn_mode: str = "same_token",
+    mv_attn_mode: str = "full_view",
     mv_use_timestep_modulation: bool = True,
+    mv_arch: str = "adapter",
     mv_ckpt: str | None = None,
 ) -> FluxMultiView:
     spec = configs[name]
@@ -86,6 +87,7 @@ def load_multiview_flux(
         single_block_stride=single_block_stride,
         mv_attn_mode=mv_attn_mode,
         mv_use_timestep_modulation=mv_use_timestep_modulation,
+        mv_arch=mv_arch,
     ).to(dtype=dtype)
 
     ckpt_path = resolve_flux_checkpoint(name, hf_download=hf_download)
@@ -98,6 +100,12 @@ def load_multiview_flux(
         missing, unexpected = model.load_state_dict(sd, strict=False)
 
     print_load_warning(missing, unexpected)
+
+    # For mv_arch='full_hidden', copy each FLUX double block img_attn into the
+    # matching MVS view_attn before loading an optional trained MVS checkpoint.
+    init_info = model.initialize_mv_attention_from_base()
+    if init_info.get("double", 0) or init_info.get("single", 0):
+        print(f"Initialized full-hidden MVS attention from base img_attn: {init_info}")
 
     if mv_ckpt:
         print(f"Loading multi-view adapter checkpoint: {mv_ckpt}")

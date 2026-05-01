@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import math
+import random
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
+from PIL import Image, ImageDraw
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
+from flux.sampling import get_schedule
 from flux.util import load_ae
 from src.local_text_encoders import load_local_text_encoders
 
@@ -22,7 +29,13 @@ from src.training.flux_train_utils import (
     make_img_ids,
     pack_latents,
     sample_flow_timesteps,
-    shared_view_noise_like,
+    unpack_latents,
+)
+
+
+IDENTITY_CAMERA_12 = torch.tensor(
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0],
+    dtype=torch.float32,
 )
 
 
@@ -41,26 +54,203 @@ def parse_args():
     p.add_argument("--grad_accum", type=int, default=1)
     p.add_argument("--mixed_precision", choices=["bf16", "fp16", "fp32"], default="bf16")
     p.add_argument("--guidance", type=float, default=3.5)
-    p.add_argument("--mv_adapter_dim", type=int, default=512)
+
+    # MVS config.
+    p.add_argument("--mv_arch", choices=["adapter", "full_hidden"], default="adapter",
+                   help="adapter: low-dimensional MVS; full_hidden: D=hidden_size MVS copied from FLUX img_attn.")
+    p.add_argument("--mv_adapter_dim", type=int, default=512,
+                   help="Only used when --mv_arch adapter. full_hidden uses FLUX hidden_size directly.")
     p.add_argument("--mv_dropout", type=float, default=0.0)
-    p.add_argument("--mv_attn_mode", choices=["same_token", "full_view"], default="same_token")
+    p.add_argument("--mv_attn_mode", choices=["same_token", "full_view"], default="full_view")
     p.add_argument("--no_mv_timestep_modulation", action="store_true")
     p.add_argument("--inject_single_blocks", action="store_true")
     p.add_argument("--single_block_stride", type=int, default=4)
     p.add_argument("--gradient_checkpointing", action="store_true")
-    p.add_argument("--noise_share_ratio", type=float, default=0.75)
+
+    # Training uses independent Gaussian noise by design. Keep this deprecated
+    # flag for backward-compatible scripts, but it is intentionally ignored.
+    p.add_argument("--noise_share_ratio", type=float, default=0.0,
+                   help="Deprecated/ignored. Training and inference use independent noise.")
+
+    # Pseudo general-image regularization: copy one view V times and set all
+    # camera extrinsics to identity. This prevents MVS adapters from overfitting
+    # to multi-view synchronization at the cost of base FLUX visual quality.
+    p.add_argument("--pseudo_general_prob", type=float, default=0.15,
+                   help="Probability per micro-batch to use copied-view identity-camera regularization.")
+    p.add_argument("--pseudo_general_random_view", action="store_true",
+                   help="Randomly choose copied source view. Otherwise use anchor view 0.")
+
     p.add_argument("--save_every", type=int, default=500)
     p.add_argument("--log_every", type=int, default=10)
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--hf_download", action="store_true")
     p.add_argument("--resume_mv_ckpt", default=None, help="Optional adapter checkpoint to continue training from.")
+
+    # End-of-training inference for quick visual evaluation.
+    p.add_argument("--no_infer_after_training", action="store_true")
+    p.add_argument("--infer_manifest", default=None, help="Manifest used for final sample generation. Defaults to train_manifest.")
+    p.add_argument("--infer_sample_index", type=int, default=0)
+    p.add_argument("--infer_num_steps", type=int, default=30)
+    p.add_argument("--infer_seed", type=int, default=42)
+    p.add_argument("--infer_guidance", type=float, default=None)
+    p.add_argument("--infer_out", default=None, help="Output image path. Defaults to output_dir/final_inference.jpg.")
     return p.parse_args()
+
+
+def setup_logging(output_dir: Path) -> logging.Logger:
+    logger = logging.getLogger("flux_multiview_train")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    fh = logging.FileHandler(output_dir / "train.log", mode="a", encoding="utf-8")
+    fh.setFormatter(fmt)
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+    return logger
+
+
+def seed_everything(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def apply_pseudo_general_regularization(
+    pixel_values: torch.Tensor,
+    cameras: torch.Tensor,
+    probability: float,
+    random_view: bool,
+) -> tuple[torch.Tensor, torch.Tensor, bool]:
+    """Copy one view V times and set every camera to identity with probability p."""
+    if probability <= 0.0 or torch.rand((), device=pixel_values.device).item() >= probability:
+        return pixel_values, cameras, False
+
+    b, v, c, h, w = pixel_values.shape
+    if random_view:
+        src_ids = torch.randint(0, v, (b,), device=pixel_values.device)
+    else:
+        src_ids = torch.zeros((b,), device=pixel_values.device, dtype=torch.long)
+
+    batch_ids = torch.arange(b, device=pixel_values.device)
+    src = pixel_values[batch_ids, src_ids]          # [B,3,H,W]
+    pixel_values = src[:, None].repeat(1, v, 1, 1, 1).contiguous()
+
+    identity = IDENTITY_CAMERA_12.to(device=cameras.device, dtype=cameras.dtype)
+    cameras = identity[None, None, :].repeat(b, v, 1).contiguous()
+    return pixel_values, cameras, True
+
+
+def load_manifest_item(path: str | Path, index: int) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if i == index:
+                return json.loads(line)
+    raise IndexError(f"sample_index={index} out of range for {path}")
+
+
+def make_independent_noise(num_views: int, height: int, width: int, device, dtype, seed: int) -> torch.Tensor:
+    latent_h = 2 * math.ceil(height / 16)
+    latent_w = 2 * math.ceil(width / 16)
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    x = torch.randn((num_views, 16, latent_h, latent_w), generator=g, dtype=torch.float32)
+    return x.to(device=device, dtype=dtype)
+
+
+def tensor_to_pil_grid(x: torch.Tensor, labels: list[str] | None = None) -> Image.Image:
+    x = (x.detach().float().cpu().clamp(-1, 1) + 1) / 2
+    imgs = []
+    for i in range(x.shape[0]):
+        arr = (x[i].permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
+        img = Image.fromarray(arr)
+        if labels:
+            draw = ImageDraw.Draw(img)
+            draw.rectangle([0, 0, 130, 26], fill=(255, 255, 255))
+            draw.text((6, 6), labels[i], fill=(0, 0, 0))
+        imgs.append(img)
+    w, h = imgs[0].size
+    grid = Image.new("RGB", (w * len(imgs), h), color=(255, 255, 255))
+    for i, img in enumerate(imgs):
+        grid.paste(img, (i * w, 0))
+    return grid
+
+
+@torch.no_grad()
+def run_final_inference(args, model, ae, t5, clip, device, dtype, logger: logging.Logger) -> Path:
+    manifest = args.infer_manifest or args.train_manifest
+    out_path = Path(args.infer_out) if args.infer_out else Path(args.output_dir) / "final_inference.jpg"
+    item = load_manifest_item(manifest, args.infer_sample_index)
+
+    prompt = item.get("prompt", "a realistic 3D-rendered scene with a character performing an action")
+    cameras = torch.tensor(item["extrinsics"][: args.num_views], dtype=torch.float32)
+    cameras = cameras[None].to(device=device, dtype=dtype)
+
+    guidance_value = args.guidance if args.infer_guidance is None else args.infer_guidance
+    x = make_independent_noise(
+        num_views=args.num_views,
+        height=args.resolution,
+        width=args.resolution,
+        device=device,
+        dtype=dtype,
+        seed=args.infer_seed,
+    )
+    latent_h, latent_w = x.shape[-2], x.shape[-1]
+    img = pack_latents(x)
+    img_ids = make_img_ids(args.num_views, latent_h, latent_w, device, dtype)
+    txt, txt_ids, y = encode_prompts(t5, clip, [prompt] * args.num_views, device, dtype)
+    guidance = torch.full((args.num_views,), guidance_value, device=device, dtype=dtype)
+
+    timesteps = get_schedule(args.infer_num_steps, img.shape[1], shift=(args.model_name != "flux-schnell"))
+    for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
+        t_vec = torch.full((args.num_views,), float(t_curr), device=device, dtype=dtype)
+        pred = model(
+            img=img,
+            img_ids=img_ids,
+            txt=txt,
+            txt_ids=txt_ids,
+            timesteps=t_vec,
+            y=y,
+            guidance=guidance,
+            cameras=cameras,
+            num_views=args.num_views,
+        )
+        img = img + (float(t_prev) - float(t_curr)) * pred
+
+    latents = unpack_latents(img, latent_h, latent_w)
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=(device.type == "cuda")):
+        out = ae.decode(latents.float())
+
+    labels = [f"view {i + 1}" for i in range(args.num_views)]
+    grid = tensor_to_pil_grid(out, labels=labels)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    grid.save(out_path)
+
+    meta = {
+        "manifest": str(manifest),
+        "sample_index": args.infer_sample_index,
+        "prompt": prompt,
+        "num_views": args.num_views,
+        "seed": args.infer_seed,
+        "num_steps": args.infer_num_steps,
+        "guidance": guidance_value,
+        "output": str(out_path),
+    }
+    with open(out_path.with_suffix(".json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2, ensure_ascii=False)
+    logger.info("Saved final inference image: %s", out_path)
+    return out_path
 
 
 def main():
     args = parse_args()
-    torch.manual_seed(args.seed)
-    Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logger = setup_logging(output_dir)
+    seed_everything(args.seed)
 
     dtype = {
         "bf16": torch.bfloat16,
@@ -69,10 +259,20 @@ def main():
     }[args.mixed_precision]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    with open(Path(args.output_dir) / "args.json", "w", encoding="utf-8") as f:
+    with open(output_dir / "args.json", "w", encoding="utf-8") as f:
+        json.dump(vars(args), f, indent=2, ensure_ascii=False)
+    with open(output_dir / "hparams.json", "w", encoding="utf-8") as f:
         json.dump(vars(args), f, indent=2, ensure_ascii=False)
 
-    print("Loading local text encoders and AE")
+    writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))
+    writer.add_text("hyperparameters/json", json.dumps(vars(args), indent=2, ensure_ascii=False), 0)
+
+    logger.info("Arguments: %s", json.dumps(vars(args), ensure_ascii=False))
+    logger.info("Device=%s dtype=%s", device, dtype)
+    if args.noise_share_ratio != 0.0:
+        logger.info("--noise_share_ratio is deprecated and ignored. Independent noise is always used.")
+
+    logger.info("Loading local text encoders and AE")
     t5, clip = load_local_text_encoders(device=device, dtype=dtype, max_length=512)
 
     try:
@@ -80,7 +280,7 @@ def main():
     except TypeError:
         ae = load_ae(args.model_name, device=device).eval().requires_grad_(False)
 
-    print("Loading FLUX MultiView transformer")
+    logger.info("Loading FLUX MultiView transformer")
     model = load_multiview_flux(
         name=args.model_name,
         device=device,
@@ -92,6 +292,7 @@ def main():
         single_block_stride=args.single_block_stride,
         mv_attn_mode=args.mv_attn_mode,
         mv_use_timestep_modulation=not args.no_mv_timestep_modulation,
+        mv_arch=args.mv_arch,
         mv_ckpt=args.resume_mv_ckpt,
     )
     model.freeze_base_model()
@@ -100,13 +301,20 @@ def main():
     model.train()
 
     trainable, total = count_trainable_params(model)
-    print(f"Trainable params: {trainable/1e6:.2f}M / total {total/1e9:.2f}B")
-    print(
-        f"MVS config: attn_mode={args.mv_attn_mode}, "
-        f"single_blocks={args.inject_single_blocks}, "
-        f"single_block_stride={args.single_block_stride}, "
-        f"timestep_modulation={not args.no_mv_timestep_modulation}"
+    logger.info("Trainable params: %.2fM / total %.2fB", trainable / 1e6, total / 1e9)
+    logger.info(
+        "MVS config: arch=%s, attn_mode=%s, adapter_dim=%s, single_blocks=%s, "
+        "single_block_stride=%s, timestep_modulation=%s, pseudo_general_prob=%.3f",
+        args.mv_arch,
+        args.mv_attn_mode,
+        args.mv_adapter_dim,
+        args.inject_single_blocks,
+        args.single_block_stride,
+        not args.no_mv_timestep_modulation,
+        args.pseudo_general_prob,
     )
+    writer.add_scalar("params/trainable", trainable, 0)
+    writer.add_scalar("params/total", total, 0)
 
     dataset = SynCamImageGroupDataset(
         args.train_manifest,
@@ -122,6 +330,7 @@ def main():
         drop_last=True,
         collate_fn=collate_fn,
     )
+    logger.info("Dataset samples=%d manifest=%s", len(dataset), args.train_manifest)
 
     optimizer = torch.optim.AdamW(
         list(model.trainable_parameters()),
@@ -135,6 +344,7 @@ def main():
     optim_step = 0
     running_loss = 0.0
     running_count = 0
+    pseudo_count = 0
     optimizer.zero_grad(set_to_none=True)
     pbar = tqdm(total=args.max_steps)
 
@@ -155,6 +365,14 @@ def main():
             )
             prompts = batch["prompts"]
 
+            pixel_values, cameras, used_pseudo = apply_pseudo_general_regularization(
+                pixel_values=pixel_values,
+                cameras=cameras,
+                probability=args.pseudo_general_prob,
+                random_view=args.pseudo_general_random_view,
+            )
+            pseudo_count += int(used_pseudo)
+
             b, v, c, h, w = pixel_values.shape
             assert v == args.num_views, f"Dataset returned V={v}, expected {args.num_views}"
             pixel_values = pixel_values.reshape(b * v, c, h, w)
@@ -162,18 +380,11 @@ def main():
 
             with torch.no_grad():
                 latents = ae.encode(pixel_values).to(dtype=dtype)
-                # noise = shared_view_noise_like(
-                #     latents,
-                #     num_views=v,
-                #     share_ratio=args.noise_share_ratio,
-                # )
-                # SynCamMaster-style training noise:
-                # - the V views of the same scene share the same timestep,
-                # - but their Gaussian noise is sampled independently.
+
+                # Required: independent Gaussian noise for every view.
                 noise = torch.randn_like(latents)
 
-                # Critical fix: all views of the same scene use the same timestep.
-                # Flatten order is [scene0_view0, scene0_view1, ..., scene1_view0, ...].
+                # All views of the same scene use the same timestep.
                 t_scene = sample_flow_timesteps(b, device=device, dtype=dtype)
                 t = t_scene.repeat_interleave(v)
                 t_img = t.reshape(-1, 1, 1, 1)
@@ -204,27 +415,39 @@ def main():
             micro_step += 1
             running_loss += float(loss_raw.detach().cpu())
             running_count += 1
+            writer.add_scalar("loss/micro_raw", float(loss_raw.detach().cpu()), micro_step)
+            writer.add_scalar("batch/used_pseudo_general", int(used_pseudo), micro_step)
 
             if micro_step % args.grad_accum != 0:
                 continue
 
-            torch.nn.utils.clip_grad_norm_(list(model.trainable_parameters()), 1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(list(model.trainable_parameters()), 1.0)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
 
             optim_step += 1
             pbar.update(1)
 
+            writer.add_scalar("loss/step_raw", float(loss_raw.detach().cpu()), optim_step)
+            writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], optim_step)
+            writer.add_scalar("train/grad_norm", float(grad_norm), optim_step)
+            writer.add_scalar("train/pseudo_general_micro_batches", pseudo_count, optim_step)
+
             if optim_step % args.log_every == 0:
                 avg = running_loss / max(1, running_count)
-                tqdm.write(
-                    f"optim_step={optim_step} micro_step={micro_step} loss={avg:.6f}"
+                logger.info(
+                    "optim_step=%d micro_step=%d loss=%.6f pseudo_general_batches=%d",
+                    optim_step,
+                    micro_step,
+                    avg,
+                    pseudo_count,
                 )
+                writer.add_scalar("loss/running_avg", avg, optim_step)
                 running_loss = 0.0
                 running_count = 0
 
             if optim_step > 0 and optim_step % args.save_every == 0:
-                save_path = Path(args.output_dir) / f"mv_adapter_step_{optim_step}.pt"
+                save_path = output_dir / f"mv_adapter_step_{optim_step}.pt"
                 torch.save(
                     {
                         "state_dict": extract_mv_state_dict(model),
@@ -235,9 +458,9 @@ def main():
                     },
                     save_path,
                 )
-                tqdm.write(f"Saved {save_path}")
+                logger.info("Saved %s", save_path)
 
-    final_path = Path(args.output_dir) / "mv_adapter_last.pt"
+    final_path = output_dir / "mv_adapter_last.pt"
     torch.save(
         {
             "state_dict": extract_mv_state_dict(model),
@@ -248,7 +471,29 @@ def main():
         },
         final_path,
     )
-    print(f"Saved final adapter: {final_path}")
+    logger.info("Saved final adapter: %s", final_path)
+
+    with open(output_dir / "train_state.json", "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "optim_step": optim_step,
+                "micro_step": micro_step,
+                "pseudo_general_micro_batches": pseudo_count,
+                "final_checkpoint": str(final_path),
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    if not args.no_infer_after_training:
+        logger.info("Running end-of-training inference with independent noise")
+        model.eval()
+        run_final_inference(args, model, ae, t5, clip, device, dtype, logger)
+
+    writer.flush()
+    writer.close()
+    pbar.close()
 
 
 if __name__ == "__main__":

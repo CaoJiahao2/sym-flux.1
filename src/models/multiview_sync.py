@@ -3,24 +3,29 @@ from __future__ import annotations
 import torch
 from torch import Tensor, nn
 
+from flux.modules.layers import SelfAttention
+
 
 class MultiViewSyncBlock(nn.Module):
     """SynCamMaster-style cross-view synchronization for FLUX image tokens.
 
     Input image tokens are arranged as [B * V, S, D]. The block reshapes them to
-    [B, V, S, D], adds a camera embedding per view, performs cross-view attention,
-    and returns a residual update.
+    [B, V, S, D], adds explicit camera + spatial/view positional embeddings,
+    performs cross-view attention, and returns a residual update.
 
-    Two attention modes are supported:
-        - same_token: [B*S, V, A]. Cheap; every spatial token attends only to the
-          token with the same spatial index in other views.
-        - full_view: [B, V*S, A]. Closer to SynCamMaster; tokens attend to all
-          spatial tokens from all views. More expensive.
+    Attention modes:
+        - same_token: [B*S, V, A/D]. Cheap; every spatial token attends only to
+          the token with the same spatial index in other views.
+        - full_view: [B, V*S, A/D]. Closer to SynCamMaster; tokens attend to all
+          spatial tokens from all views. This is now the default configuration.
 
-    The timestep/guidance modulation is deliberately lightweight. Instead of a
-    full per-block hidden -> 3*hidden modulation MLP, which is very large for
-    FLUX.1-dev, this block reuses the frozen FLUX block modulation outputs passed
-    from FluxMultiView and only learns a tiny [shift, scale, gate] bias.
+    Architectures:
+        - adapter: low-dimensional adapter. Hidden D -> A -> MHA(A) -> D.
+        - full_hidden: hidden-size view attention. Uses FLUX SelfAttention at D
+          and can be initialized from each double block's img_attn weights.
+
+    The residual projector is zero-initialized, so insertion is non-destructive
+    at step 0. Camera and position encoders are also initialized conservatively.
     """
 
     def __init__(
@@ -29,64 +34,167 @@ class MultiViewSyncBlock(nn.Module):
         num_heads: int,
         adapter_dim: int = 512,
         dropout: float = 0.0,
-        attn_mode: str = "same_token",
+        attn_mode: str = "full_view",
         use_timestep_modulation: bool = True,
+        mv_arch: str = "adapter",
+        qkv_bias: bool = True,
     ) -> None:
         super().__init__()
         if attn_mode not in {"same_token", "full_view"}:
             raise ValueError(f"Unsupported attn_mode={attn_mode}. Use 'same_token' or 'full_view'.")
-
-        if adapter_dim % num_heads != 0:
-            # Use a valid number of adapter heads even when adapter_dim is small.
-            valid_heads = max(1, min(num_heads, adapter_dim // 64))
-            while adapter_dim % valid_heads != 0 and valid_heads > 1:
-                valid_heads -= 1
-            num_adapter_heads = valid_heads
-        else:
-            num_adapter_heads = num_heads
+        if mv_arch not in {"adapter", "full_hidden"}:
+            raise ValueError(f"Unsupported mv_arch={mv_arch}. Use 'adapter' or 'full_hidden'.")
 
         self.hidden_size = hidden_size
-        self.adapter_dim = adapter_dim
-        self.num_adapter_heads = num_adapter_heads
+        self.mv_arch = mv_arch
         self.attn_mode = attn_mode
         self.use_timestep_modulation = use_timestep_modulation
+        self.is_full_hidden = mv_arch == "full_hidden"
+        self.attn_dim = hidden_size if self.is_full_hidden else adapter_dim
+
+        if self.is_full_hidden:
+            self.num_adapter_heads = num_heads
+        elif self.attn_dim % num_heads != 0:
+            # Use a valid number of adapter heads when adapter_dim is small.
+            valid_heads = max(1, min(num_heads, self.attn_dim // 64))
+            while self.attn_dim % valid_heads != 0 and valid_heads > 1:
+                valid_heads -= 1
+            self.num_adapter_heads = valid_heads
+        else:
+            self.num_adapter_heads = num_heads
 
         self.norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.down = nn.Linear(hidden_size, adapter_dim, bias=True)
+
+        if self.is_full_hidden:
+            self.down = nn.Identity()
+            self.view_attn = SelfAttention(
+                dim=hidden_size,
+                num_heads=num_heads,
+                qkv_bias=qkv_bias,
+            )
+            self.projector = nn.Linear(hidden_size, hidden_size, bias=True)
+        else:
+            self.down = nn.Linear(hidden_size, self.attn_dim, bias=True)
+            self.view_attn = nn.MultiheadAttention(
+                embed_dim=self.attn_dim,
+                num_heads=self.num_adapter_heads,
+                dropout=dropout,
+                batch_first=True,
+            )
+            self.projector = nn.Linear(self.attn_dim, hidden_size, bias=True)
 
         # Do not LayerNorm the 12 camera values. Rotation/translation scale should
         # be normalized in camera preprocessing, not erased here.
         self.camera_encoder = nn.Sequential(
-            nn.Linear(12, adapter_dim),
+            nn.Linear(12, self.attn_dim),
             nn.SiLU(),
-            nn.Linear(adapter_dim, adapter_dim),
+            nn.Linear(self.attn_dim, self.attn_dim),
         )
 
-        self.view_attn = nn.MultiheadAttention(
-            embed_dim=adapter_dim,
-            num_heads=num_adapter_heads,
-            dropout=dropout,
-            batch_first=True,
+        # Explicit view/spatial positional encoding. Input = [view_id, y, x]
+        # normalized to roughly [0, 1]. This is important for full_view mode,
+        # where V*S tokens are mixed in a single sequence.
+        self.position_encoder = nn.Sequential(
+            nn.Linear(3, self.attn_dim),
+            nn.SiLU(),
+            nn.Linear(self.attn_dim, self.attn_dim),
         )
-        self.up = nn.Linear(adapter_dim, hidden_size, bias=True)
 
         if use_timestep_modulation:
-            # SynCamMaster has per-block modulation_mvs initialized from the base
-            # modulation. For FLUX we reuse the frozen base modulation and learn a
-            # tiny additive bias, avoiding a huge per-block MLP.
+            # Reuse frozen FLUX block modulation and learn a tiny additive bias.
             self.modulation_bias = nn.Parameter(torch.zeros(1, 3, hidden_size))
         else:
             self.register_parameter("modulation_bias", None)
 
         # Non-destructive insertion: at step 0 this block is an exact residual no-op.
-        nn.init.zeros_(self.up.weight)
-        nn.init.zeros_(self.up.bias)
+        nn.init.zeros_(self.projector.weight)
+        nn.init.zeros_(self.projector.bias)
+
+        # Conservative start for camera and position branches.
+        if isinstance(self.camera_encoder[-1], nn.Linear):
+            nn.init.zeros_(self.camera_encoder[-1].weight)
+            nn.init.zeros_(self.camera_encoder[-1].bias)
+        if isinstance(self.position_encoder[-1], nn.Linear):
+            nn.init.zeros_(self.position_encoder[-1].weight)
+            nn.init.zeros_(self.position_encoder[-1].bias)
+
+    @torch.no_grad()
+    def init_from_flux_img_attn(self, img_attn: nn.Module) -> bool:
+        """Initialize full-hidden view attention from FLUX image self-attention.
+
+        Returns True if weights were copied. For low-dimensional adapter mode this
+        is a no-op because the dimensions do not match.
+        """
+        if not self.is_full_hidden:
+            return False
+        self.view_attn.load_state_dict(img_attn.state_dict(), strict=True)
+        return True
+
+    def _position_features(
+        self,
+        img_ids: Tensor | None,
+        batch_size: int,
+        num_views: int,
+        seq_len: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> Tensor:
+        """Return [B,V,S,3] with explicit [view_id, normalized_y, normalized_x]."""
+        view_id = torch.arange(num_views, device=device, dtype=dtype)[None, :, None, None]
+        view_id = view_id.expand(batch_size, num_views, seq_len, 1)
+        view_id = view_id / max(1, num_views - 1)
+
+        if img_ids is None:
+            # Fallback: infer a square-ish raster order when ids are unavailable.
+            side = int(seq_len**0.5)
+            if side * side == seq_len:
+                yy = torch.arange(side, device=device, dtype=dtype)[:, None].expand(side, side)
+                xx = torch.arange(side, device=device, dtype=dtype)[None, :].expand(side, side)
+                xy = torch.stack([yy.reshape(-1), xx.reshape(-1)], dim=-1)
+            else:
+                idx = torch.arange(seq_len, device=device, dtype=dtype)
+                xy = torch.stack([idx, torch.zeros_like(idx)], dim=-1)
+            xy = xy[None, None].expand(batch_size, num_views, seq_len, 2)
+        else:
+            ids = img_ids.reshape(batch_size, num_views, seq_len, 3).to(device=device, dtype=dtype)
+            xy = ids[..., 1:3]
+
+        denom = xy.amax(dim=(1, 2), keepdim=True).clamp_min(1.0)
+        xy = xy / denom
+        return torch.cat([view_id, xy], dim=-1)
+
+    def _full_view_ids(
+        self,
+        img_ids: Tensor,
+        batch_size: int,
+        num_views: int,
+        seq_len: int,
+    ) -> Tensor:
+        ids = img_ids.reshape(batch_size, num_views, seq_len, 3).clone()
+        view_ids = torch.arange(num_views, device=ids.device, dtype=ids.dtype)
+        ids[..., 0] = view_ids[None, :, None]
+        return ids.reshape(batch_size, num_views * seq_len, 3)
+
+    def _same_token_ids(
+        self,
+        img_ids: Tensor,
+        batch_size: int,
+        num_views: int,
+        seq_len: int,
+    ) -> Tensor:
+        ids = img_ids.reshape(batch_size, num_views, seq_len, 3).clone()
+        ids = ids.permute(0, 2, 1, 3).reshape(batch_size * seq_len, num_views, 3)
+        view_ids = torch.arange(num_views, device=ids.device, dtype=ids.dtype)
+        ids[..., 0] = view_ids[None, :]
+        return ids
 
     def forward(
         self,
         img_tokens: Tensor,
         cameras: Tensor,
         num_views: int,
+        img_ids: Tensor | None = None,
+        pe_embedder: nn.Module | None = None,
         mod_shift: Tensor | None = None,
         mod_scale: Tensor | None = None,
         mod_gate: Tensor | None = None,
@@ -97,6 +205,8 @@ class MultiViewSyncBlock(nn.Module):
             img_tokens: [B*V, S, D].
             cameras: [B, V, 12], relative [R|t] extrinsics.
             num_views: V.
+            img_ids: [B*V, S, 3], FLUX spatial ids.
+            pe_embedder: FLUX EmbedND. Required for full_hidden mode.
             mod_shift/mod_scale/mod_gate: optional frozen FLUX modulation outputs,
                 each with shape [B*V, 1, D].
         """
@@ -132,34 +242,48 @@ class MultiViewSyncBlock(nn.Module):
             gate = mod_gate.to(dtype=x_norm.dtype, device=x_norm.device) + bias_gate
             x_norm = (1.0 + scale) * x_norm + shift
 
-        # reshape instead of view: single-block image slices are often non-contiguous.
         x = x_norm.reshape(batch_size, num_views, seq_len, dim)  # [B,V,S,D]
-        x_small = self.down(x)                                  # [B,V,S,A]
+        x_sync = self.down(x)                                    # [B,V,S,A/D]
 
-        cam = self.camera_encoder(cameras.to(dtype=x_small.dtype, device=x_small.device))
-        x_small = x_small + cam[:, :, None, :]                  # [B,V,S,A]
+        cam = self.camera_encoder(cameras.to(dtype=x_sync.dtype, device=x_sync.device))
+        x_sync = x_sync + cam[:, :, None, :]
+
+        pos_feat = self._position_features(
+            img_ids=img_ids,
+            batch_size=batch_size,
+            num_views=num_views,
+            seq_len=seq_len,
+            dtype=x_sync.dtype,
+            device=x_sync.device,
+        )
+        x_sync = x_sync + self.position_encoder(pos_feat)
 
         if self.attn_mode == "same_token":
-            # [B,V,S,A] -> [B*S,V,A]
-            y = x_small.permute(0, 2, 1, 3).reshape(
-                batch_size * seq_len,
-                num_views,
-                self.adapter_dim,
-            )
-            y, _ = self.view_attn(y, y, y, need_weights=False)
-            y = y.reshape(
-                batch_size,
-                seq_len,
-                num_views,
-                self.adapter_dim,
-            ).permute(0, 2, 1, 3)  # [B,V,S,A]
+            # [B,V,S,A/D] -> [B*S,V,A/D]
+            y = x_sync.permute(0, 2, 1, 3).reshape(batch_size * seq_len, num_views, self.attn_dim)
+            if self.is_full_hidden:
+                if pe_embedder is None or img_ids is None:
+                    raise ValueError("full_hidden MVS requires img_ids and pe_embedder.")
+                attn_ids = self._same_token_ids(img_ids, batch_size, num_views, seq_len)
+                pe = pe_embedder(attn_ids)
+                y = self.view_attn(y, pe=pe)
+            else:
+                y, _ = self.view_attn(y, y, y, need_weights=False)
+            y = y.reshape(batch_size, seq_len, num_views, self.attn_dim).permute(0, 2, 1, 3)
         else:
-            # [B,V,S,A] -> [B,V*S,A], closer to SynCamMaster.
-            y = x_small.reshape(batch_size, num_views * seq_len, self.adapter_dim)
-            y, _ = self.view_attn(y, y, y, need_weights=False)
-            y = y.reshape(batch_size, num_views, seq_len, self.adapter_dim)
+            # [B,V,S,A/D] -> [B,V*S,A/D], closer to SynCamMaster.
+            y = x_sync.reshape(batch_size, num_views * seq_len, self.attn_dim)
+            if self.is_full_hidden:
+                if pe_embedder is None or img_ids is None:
+                    raise ValueError("full_hidden MVS requires img_ids and pe_embedder.")
+                attn_ids = self._full_view_ids(img_ids, batch_size, num_views, seq_len)
+                pe = pe_embedder(attn_ids)
+                y = self.view_attn(y, pe=pe)
+            else:
+                y, _ = self.view_attn(y, y, y, need_weights=False)
+            y = y.reshape(batch_size, num_views, seq_len, self.attn_dim)
 
-        update = self.up(y).reshape(bv, seq_len, dim)
+        update = self.projector(y).reshape(bv, seq_len, dim)
         if gate is not None:
             update = gate.to(dtype=update.dtype, device=update.device) * update
         return img_tokens + update

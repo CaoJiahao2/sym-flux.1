@@ -31,8 +31,9 @@ def parse_args():
     p.add_argument("--num_steps", type=int, default=30)
     p.add_argument("--guidance", type=float, default=3.5)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--mv_arch", choices=["adapter", "full_hidden"], default="adapter")
     p.add_argument("--mv_adapter_dim", type=int, default=512)
-    p.add_argument("--mv_attn_mode", choices=["same_token", "full_view"], default="same_token")
+    p.add_argument("--mv_attn_mode", choices=["same_token", "full_view"], default="full_view")
     p.add_argument("--no_mv_timestep_modulation", action="store_true")
     p.add_argument("--inject_single_blocks", action="store_true")
     p.add_argument("--single_block_stride", type=int, default=4)
@@ -128,6 +129,7 @@ def main():
         single_block_stride=args.single_block_stride,
         mv_attn_mode=args.mv_attn_mode,
         mv_use_timestep_modulation=not args.no_mv_timestep_modulation,
+        mv_arch=args.mv_arch,
         mv_ckpt=args.mv_ckpt,
     ).eval()
 

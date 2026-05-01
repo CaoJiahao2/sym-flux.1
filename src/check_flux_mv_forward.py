@@ -13,8 +13,9 @@ def main():
     p.add_argument("--num_views", type=int, default=2)
     p.add_argument("--seq_len", type=int, default=256)
     p.add_argument("--txt_len", type=int, default=16)
+    p.add_argument("--mv_arch", choices=["adapter", "full_hidden"], default="adapter")
     p.add_argument("--mv_adapter_dim", type=int, default=128)
-    p.add_argument("--mv_attn_mode", choices=["same_token", "full_view"], default="same_token")
+    p.add_argument("--mv_attn_mode", choices=["same_token", "full_view"], default="full_view")
     p.add_argument("--inject_single_blocks", action="store_true")
     p.add_argument("--single_block_stride", type=int, default=4)
     p.add_argument("--no_mv_timestep_modulation", action="store_true")
@@ -30,6 +31,7 @@ def main():
         hf_download=args.hf_download,
         mv_adapter_dim=args.mv_adapter_dim,
         mv_attn_mode=args.mv_attn_mode,
+        mv_arch=args.mv_arch,
         inject_single_blocks=args.inject_single_blocks,
         single_block_stride=args.single_block_stride,
         mv_use_timestep_modulation=not args.no_mv_timestep_modulation,
@@ -58,6 +60,7 @@ def main():
     print(
         "mvs config",
         {
+            "arch": args.mv_arch,
             "attn_mode": args.mv_attn_mode,
             "inject_single_blocks": args.inject_single_blocks,
             "single_block_stride": args.single_block_stride,

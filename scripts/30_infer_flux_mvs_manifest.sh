@@ -5,7 +5,7 @@ source scripts/00_local_flux_env.sh
 export PYTHONPATH="$(pwd):$(pwd)/src:${PYTHONPATH:-}"
 
 HF_FLAG=""
-if [[ "${HF_DOWNLOAD}" == "1" ]]; then
+if [[ "${HF_DOWNLOAD:-0}" == "1" ]]; then
   HF_FLAG="--hf_download"
 fi
 
@@ -30,8 +30,9 @@ python src/infer_flux_multiview.py \
   --num_steps "${NUM_STEPS:-30}" \
   --guidance "${GUIDANCE:-3.5}" \
   --seed "${SEED:-42}" \
+  --mv_arch "${MV_ARCH:-adapter}" \
   --mv_adapter_dim "${MV_ADAPTER_DIM:-512}" \
-  --mv_attn_mode "${MV_ATTN_MODE:-same_token}" \
+  --mv_attn_mode "${MV_ATTN_MODE:-full_view}" \
   --single_block_stride "${SINGLE_BLOCK_STRIDE:-4}" \
   --out "${OUT:-outputs/flux_mv_demo.jpg}" \
   ${SINGLE_FLAG} \

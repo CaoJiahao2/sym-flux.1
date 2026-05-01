@@ -13,13 +13,9 @@ from .multiview_sync import MultiViewSyncBlock
 class FluxMultiView(Flux):
     """Non-destructive FLUX.1 multi-view extension.
 
-    This subclass leaves the official black-forest-labs/flux source unchanged.
-    It reuses the original Flux modules and inserts trainable multi-view sync
-    adapters after double-stream blocks and optionally after selected
-    single-stream blocks.
-
-    Load original FLUX weights with strict=False. Missing keys should be only
-    mv_double_blocks / mv_single_blocks.
+    The official FLUX modules stay unchanged. This subclass inserts trainable
+    SynCamMaster-style multi-view synchronization blocks after every double-stream
+    block and, optionally, after selected single-stream blocks.
     """
 
     def __init__(
@@ -29,8 +25,9 @@ class FluxMultiView(Flux):
         mv_dropout: float = 0.0,
         inject_single_blocks: bool = False,
         single_block_stride: int = 4,
-        mv_attn_mode: str = "same_token",
+        mv_attn_mode: str = "full_view",
         mv_use_timestep_modulation: bool = True,
+        mv_arch: str = "adapter",
     ) -> None:
         super().__init__(params)
         if single_block_stride <= 0:
@@ -39,6 +36,7 @@ class FluxMultiView(Flux):
         self.inject_single_blocks = inject_single_blocks
         self.single_block_stride = single_block_stride
         self.mv_attn_mode = mv_attn_mode
+        self.mv_arch = mv_arch
         self.mv_use_timestep_modulation = mv_use_timestep_modulation
         self._gradient_checkpointing = False
 
@@ -50,6 +48,8 @@ class FluxMultiView(Flux):
                 dropout=mv_dropout,
                 attn_mode=mv_attn_mode,
                 use_timestep_modulation=mv_use_timestep_modulation,
+                mv_arch=mv_arch,
+                qkv_bias=params.qkv_bias,
             )
             for _ in range(params.depth)
         ])
@@ -64,12 +64,34 @@ class FluxMultiView(Flux):
                     dropout=mv_dropout,
                     attn_mode=mv_attn_mode,
                     use_timestep_modulation=mv_use_timestep_modulation,
+                    mv_arch=mv_arch,
+                    qkv_bias=params.qkv_bias,
                 )
                 for i in self.single_block_indices
             })
         else:
             self.single_block_indices = []
             self.mv_single_blocks = nn.ModuleDict()
+
+    @torch.no_grad()
+    def initialize_mv_attention_from_base(self) -> dict[str, int]:
+        """Initialize full-hidden MVS attention from FLUX image self-attention.
+
+        For mv_arch='adapter', dimensions do not match, so this is a no-op.
+        For mv_arch='full_hidden', each double MVS block copies the corresponding
+        double block's img_attn weights. Optional single MVS blocks copy from the
+        nearest available double block img_attn.
+        """
+        copied_double = 0
+        copied_single = 0
+        for mvs, block in zip(self.mv_double_blocks, self.double_blocks):
+            copied_double += int(mvs.init_from_flux_img_attn(block.img_attn))
+
+        for key, mvs in self.mv_single_blocks.items():
+            idx = min(int(key), len(self.double_blocks) - 1)
+            copied_single += int(mvs.init_from_flux_img_attn(self.double_blocks[idx].img_attn))
+
+        return {"double": copied_double, "single": copied_single}
 
     def enable_gradient_checkpointing(self) -> None:
         self._gradient_checkpointing = True
@@ -111,6 +133,7 @@ class FluxMultiView(Flux):
         block,
         mvs_block: MultiViewSyncBlock,
         img: Tensor,
+        img_ids: Tensor,
         cameras: Tensor,
         num_views: int,
         vec: Tensor,
@@ -120,6 +143,8 @@ class FluxMultiView(Flux):
             img,
             cameras=cameras,
             num_views=num_views,
+            img_ids=img_ids,
+            pe_embedder=self.pe_embedder,
             mod_shift=img_mod1.shift,
             mod_scale=img_mod1.scale,
             mod_gate=img_mod1.gate,
@@ -130,6 +155,7 @@ class FluxMultiView(Flux):
         block,
         mvs_block: MultiViewSyncBlock,
         img_part: Tensor,
+        img_ids: Tensor,
         cameras: Tensor,
         num_views: int,
         vec: Tensor,
@@ -139,6 +165,8 @@ class FluxMultiView(Flux):
             img_part,
             cameras=cameras,
             num_views=num_views,
+            img_ids=img_ids,
+            pe_embedder=self.pe_embedder,
             mod_shift=mod.shift,
             mod_scale=mod.scale,
             mod_gate=mod.gate,
@@ -178,12 +206,13 @@ class FluxMultiView(Flux):
                 img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
             if cameras is not None and num_views > 1:
                 img = self._mvs_from_double_block(
-                    block,
-                    self.mv_double_blocks[i],
-                    img,
-                    cameras,
-                    num_views,
-                    vec,
+                    block=block,
+                    mvs_block=self.mv_double_blocks[i],
+                    img=img,
+                    img_ids=img_ids,
+                    cameras=cameras,
+                    num_views=num_views,
+                    vec=vec,
                 )
 
         txt_len = txt.shape[1]
@@ -198,12 +227,13 @@ class FluxMultiView(Flux):
             if self.inject_single_blocks and cameras is not None and num_views > 1 and str(i) in self.mv_single_blocks:
                 txt_part, img_part = img[:, :txt_len, :], img[:, txt_len:, :]
                 img_part = self._mvs_from_single_block(
-                    block,
-                    self.mv_single_blocks[str(i)],
-                    img_part,
-                    cameras,
-                    num_views,
-                    vec,
+                    block=block,
+                    mvs_block=self.mv_single_blocks[str(i)],
+                    img_part=img_part,
+                    img_ids=img_ids,
+                    cameras=cameras,
+                    num_views=num_views,
+                    vec=vec,
                 )
                 img = torch.cat((txt_part, img_part), dim=1)
 

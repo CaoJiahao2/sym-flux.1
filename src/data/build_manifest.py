@@ -67,6 +67,7 @@ def select_views(
     all_cams: List[str],
     all_mats: Dict[str, object],
     num_views: int,
+    min_angle: float | None,
     max_angle: float | None,
     rng: random.Random,
     sampling: str,
@@ -83,8 +84,11 @@ def select_views(
     for combo in combos:
         mats = [all_mats[c] for c in combo]
         angle = max_pairwise_rotation_angle_deg(mats)
-        if max_angle is None or angle <= max_angle:
-            valid.append((angle, list(combo)))
+        if min_angle is not None and angle < min_angle:
+            continue
+        if max_angle is not None and angle > max_angle:
+            continue
+        valid.append((angle, list(combo)))
 
     if not valid:
         return None
@@ -158,6 +162,7 @@ def build_manifest(args: argparse.Namespace) -> None:
                     all_cams=all_cams,
                     all_mats=syncam_c2w_by_cam,
                     num_views=args.num_views,
+                    min_angle=args.min_angle,
                     max_angle=args.max_angle,
                     rng=rng,
                     sampling=args.sampling,
@@ -208,6 +213,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frame_stride", type=int, default=8)
     parser.add_argument("--num_views", type=int, default=0, help="0 means keep all available cameras")
     parser.add_argument("--cams", type=str, default="", help="Optional comma list, e.g. cam01,cam02,...")
+    parser.add_argument("--min_angle", type=float, default=None, help="Optional min pairwise rotation angle in degrees")
     parser.add_argument("--max_angle", type=float, default=None, help="Optional max pairwise rotation angle in degrees")
     parser.add_argument("--sampling", type=str, default="first", choices=["first", "random"])
     parser.add_argument("--seed", type=int, default=1234)
