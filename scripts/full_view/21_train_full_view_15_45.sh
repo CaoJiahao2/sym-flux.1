@@ -29,7 +29,6 @@ export MV_ADAPTER_DIM="${MV_ADAPTER_DIM:-512}"
 
 export TRAIN_MANIFEST="${TRAIN_MANIFEST:-data/samples/stride_${FRAME_STRIDE:-8}_angle_15-45_v${NUM_VIEWS}_train_samples.jsonl}"
 export INFER_MANIFEST="${INFER_MANIFEST:-data/samples/stride_${FRAME_STRIDE:-8}_angle_15-45_v${NUM_VIEWS}_val_samples.jsonl}"
-export OUTPUT_DIR="${OUTPUT_DIR:-outputs/full_view_angle_15-45_${MV_ARCH}}"
 export MAX_STEPS="${MAX_STEPS:-10000}"
 export SAVE_EVERY="${SAVE_EVERY:-500}"
 export RESOLUTION="${RESOLUTION:-512}"
@@ -39,6 +38,9 @@ export LR="${LR:-1e-4}"
 export INFER_SAMPLE_INDEX="${INFER_SAMPLE_INDEX:-0}"
 export INFER_NUM_STEPS="${INFER_NUM_STEPS:-30}"
 export INFER_SEED="${INFER_SEED:-42}"
+
+RUN_NAME="${MV_ATTN_MODE}_angle_15-45_${MV_ARCH}_steps${MAX_STEPS}_views${NUM_VIEWS}_dim${MV_ADAPTER_DIM}"
+export OUTPUT_DIR="${OUTPUT_DIR:-outputs/${RUN_NAME}}"
 export INFER_OUT="${INFER_OUT:-${OUTPUT_DIR}/final_inference_angle_15-45.jpg}"
 
 if [[ -z "${RESUME_MV_CKPT:-}" ]]; then

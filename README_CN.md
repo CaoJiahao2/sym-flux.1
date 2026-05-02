@@ -390,8 +390,9 @@ http://127.0.0.1:6006
 
 ```bash
 GPU_IDS=0 \
-MV_ARCH=adapter \
+NUM_VIEWS=2 \
 MAX_STEPS=5000 \
+MV_ADAPTER_DIM=512 \
 bash scripts/full_view/20_train_full_view_0_30.sh
 ```
 

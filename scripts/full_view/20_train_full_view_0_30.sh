@@ -18,27 +18,28 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 
-export NUM_VIEWS="${NUM_VIEWS:-4}"
+export NUM_VIEWS="${NUM_VIEWS:-2}"
 export MV_ATTN_MODE="${MV_ATTN_MODE:-full_view}"
 export INJECT_SINGLE_BLOCKS="${INJECT_SINGLE_BLOCKS:-1}"
 export PSEUDO_GENERAL_PROB="${PSEUDO_GENERAL_PROB:-0.25}"
 export PSEUDO_GENERAL_RANDOM_VIEW="${PSEUDO_GENERAL_RANDOM_VIEW:-1}"
-export SINGLE_BLOCK_STRIDE="${SINGLE_BLOCK_STRIDE:-4}"
+export SINGLE_BLOCK_STRIDE="${SINGLE_BLOCK_STRIDE:-3}"
 export MV_ARCH="${MV_ARCH:-adapter}"
 export MV_ADAPTER_DIM="${MV_ADAPTER_DIM:-512}"
-
 export TRAIN_MANIFEST="${TRAIN_MANIFEST:-data/samples/stride_${FRAME_STRIDE:-8}_angle_0-30_v${NUM_VIEWS}_train_samples.jsonl}"
 export INFER_MANIFEST="${INFER_MANIFEST:-data/samples/stride_${FRAME_STRIDE:-8}_angle_0-30_v${NUM_VIEWS}_val_samples.jsonl}"
-export OUTPUT_DIR="${OUTPUT_DIR:-outputs/full_view_angle_0-30_${MV_ARCH}}"
 export MAX_STEPS="${MAX_STEPS:-5000}"
 export SAVE_EVERY="${SAVE_EVERY:-500}"
 export RESOLUTION="${RESOLUTION:-512}"
 export BATCH_SIZE="${BATCH_SIZE:-1}"
-export GRAD_ACCUM="${GRAD_ACCUM:-8}"
+export GRAD_ACCUM="${GRAD_ACCUM:-16}"
 export LR="${LR:-1e-4}"
 export INFER_SAMPLE_INDEX="${INFER_SAMPLE_INDEX:-0}"
 export INFER_NUM_STEPS="${INFER_NUM_STEPS:-30}"
 export INFER_SEED="${INFER_SEED:-42}"
+
+RUN_NAME="${MV_ATTN_MODE}_angle_0-30_${MV_ARCH}_steps${MAX_STEPS}_views${NUM_VIEWS}_dim${MV_ADAPTER_DIM}_grad${GRAD_ACCUM}"
+export OUTPUT_DIR="${OUTPUT_DIR:-outputs/${RUN_NAME}}"
 export INFER_OUT="${INFER_OUT:-${OUTPUT_DIR}/final_inference_angle_0-30.jpg}"
 
 # 第一阶段默认不自动 resume。如需继续训练，手动设置 RESUME_MV_CKPT=/path/to/mv_adapter_last.pt。
