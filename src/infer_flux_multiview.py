@@ -11,16 +11,18 @@ from PIL import Image, ImageDraw
 
 from flux.sampling import get_schedule
 from flux.util import load_ae
+from src.config_utils import load_config_file, validate_config_keys
 from src.local_text_encoders import load_local_text_encoders
 
 from src.models.flux_multiview_loader import load_multiview_flux
 from src.training.flux_train_utils import encode_prompts, make_img_ids, pack_latents, unpack_latents
 
 
-def parse_args():
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
+    p.add_argument("--config", default=None, help="Path to a JSON/YAML inference config. CLI arguments override config values.")
     p.add_argument("--model_name", default="flux-dev")
-    p.add_argument("--mv_ckpt", required=True)
+    p.add_argument("--mv_ckpt", default=None, help="Path to a trained MVS adapter checkpoint.")
     p.add_argument("--prompt", default=None)
     p.add_argument("--manifest", default=None)
     p.add_argument("--sample_index", type=int, default=0)
@@ -40,7 +42,30 @@ def parse_args():
     p.add_argument("--single_block_stride", type=int, default=4)
     p.add_argument("--hf_download", action="store_true")
     p.add_argument("--out", default="outputs/flux_mv_demo.jpg")
-    return p.parse_args()
+    return p
+
+
+def parse_args():
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", default=None)
+    known, _ = pre.parse_known_args()
+
+    p = build_parser()
+    config_data = {}
+    if known.config:
+        config_data = load_config_file(known.config)
+        valid_keys = {a.dest for a in p._actions if a.dest != "help"}
+        validate_config_keys(config_data, valid_keys, known.config)
+        p.set_defaults(**config_data)
+
+    args = p.parse_args()
+    if args.mv_ckpt is None:
+        p.error("--mv_ckpt is required, either in the config file or on the command line.")
+    if args.manifest is None and args.camera_json is None:
+        p.error("Provide --manifest or --camera_json, either in the config file or on the command line.")
+
+    args.config_data = config_data
+    return args
 
 
 def load_manifest_item(path: str, index: int) -> dict:

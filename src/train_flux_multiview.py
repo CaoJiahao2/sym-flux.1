@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
 import math
@@ -17,6 +18,7 @@ from tqdm import tqdm
 
 from flux.sampling import get_schedule
 from flux.util import load_ae
+from src.config_utils import load_config_file, validate_config_keys
 from src.local_text_encoders import load_local_text_encoders
 
 from src.data.syncam_dataset import SynCamImageGroupDataset, collate_fn
@@ -39,11 +41,12 @@ IDENTITY_CAMERA_12 = torch.tensor(
 )
 
 
-def parse_args():
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
+    p.add_argument("--config", default=None, help="Path to a JSON/YAML config. CLI arguments override config values.")
     p.add_argument("--model_name", default="flux-dev")
-    p.add_argument("--train_manifest", required=True)
-    p.add_argument("--output_dir", required=True)
+    p.add_argument("--train_manifest", default=None)
+    p.add_argument("--output_dir", default=None)
     p.add_argument("--resolution", type=int, default=512)
     p.add_argument("--num_views", type=int, default=2)
     p.add_argument("--batch_size", type=int, default=1)
@@ -87,16 +90,41 @@ def parse_args():
     p.add_argument("--hf_download", action="store_true")
     p.add_argument("--resume_mv_ckpt", default=None, help="Optional adapter checkpoint to continue training from.")
 
-    # End-of-training inference for quick visual evaluation.
+    # Periodic and end-of-training inference for visual evaluation.
+    p.add_argument("--infer_every", type=int, default=500,
+                   help="Run multi-view inference every N optimizer steps. Set <=0 to disable periodic inference.")
     p.add_argument("--no_infer_after_training", action="store_true")
-    p.add_argument("--infer_manifest", default=None, help="Manifest used for final sample generation. Defaults to train_manifest.")
+    p.add_argument("--infer_manifest", default=None, help="Manifest used for sample generation. Defaults to train_manifest.")
     p.add_argument("--infer_sample_index", type=int, default=0)
     p.add_argument("--infer_num_steps", type=int, default=30)
     p.add_argument("--infer_seed", type=int, default=42)
     p.add_argument("--infer_guidance", type=float, default=None)
-    p.add_argument("--infer_out", default=None, help="Output image path. Defaults to output_dir/final_inference.jpg.")
-    return p.parse_args()
+    p.add_argument("--infer_out", default=None, help="Final output image path. Defaults to output_dir/final_inference.jpg.")
+    return p
 
+
+def parse_args():
+    # First pass: only discover --config.
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", default=None)
+    known, _ = pre.parse_known_args()
+
+    p = build_parser()
+    config_data = {}
+    if known.config:
+        config_data = load_config_file(known.config)
+        valid_keys = {a.dest for a in p._actions if a.dest != "help"}
+        validate_config_keys(config_data, valid_keys, known.config)
+        p.set_defaults(**config_data)
+
+    args = p.parse_args()
+    if args.train_manifest is None:
+        p.error("--train_manifest is required, either in the config file or on the command line.")
+    if args.output_dir is None:
+        p.error("--output_dir is required, either in the config file or on the command line.")
+
+    args.config_data = config_data
+    return args
 
 def setup_logging(output_dir: Path) -> logging.Logger:
     logger = logging.getLogger("flux_multiview_train")
@@ -181,7 +209,7 @@ def tensor_to_pil_grid(x: torch.Tensor, labels: list[str] | None = None) -> Imag
 
 
 @torch.no_grad()
-def run_final_inference(args, model, ae, t5, clip, device, dtype, logger: logging.Logger) -> Path:
+def run_sample_inference(args, model, ae, t5, clip, device, dtype, logger: logging.Logger) -> Path:
     manifest = args.infer_manifest or args.train_manifest
     out_path = Path(args.infer_out) if args.infer_out else Path(args.output_dir) / "final_inference.jpg"
     item = load_manifest_item(manifest, args.infer_sample_index)
@@ -242,8 +270,21 @@ def run_final_inference(args, model, ae, t5, clip, device, dtype, logger: loggin
     }
     with open(out_path.with_suffix(".json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
-    logger.info("Saved final inference image: %s", out_path)
+    logger.info("Saved inference image: %s", out_path)
     return out_path
+
+
+def run_periodic_inference(args, model, ae, t5, clip, device, dtype, logger: logging.Logger, writer: SummaryWriter, step: int) -> Path:
+    infer_args = copy.copy(args)
+    infer_args.infer_out = str(Path(args.output_dir) / "visualizations" / f"step_{step:06d}.jpg")
+    path = run_sample_inference(infer_args, model, ae, t5, clip, device, dtype, logger)
+    try:
+        img = Image.open(path).convert("RGB")
+        arr = np.asarray(img).transpose(2, 0, 1)
+        writer.add_image("infer/periodic_grid", arr, step)
+    except Exception as exc:  # visualization logging must not break training
+        logger.warning("Could not add periodic inference image to TensorBoard: %s", exc)
+    return path
 
 
 def main():
@@ -264,6 +305,9 @@ def main():
         json.dump(vars(args), f, indent=2, ensure_ascii=False)
     with open(output_dir / "hparams.json", "w", encoding="utf-8") as f:
         json.dump(vars(args), f, indent=2, ensure_ascii=False)
+    if getattr(args, "config_data", None):
+        with open(output_dir / "config_snapshot.json", "w", encoding="utf-8") as f:
+            json.dump(args.config_data, f, indent=2, ensure_ascii=False)
 
     writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))
     writer.add_text("hyperparameters/json", json.dumps(vars(args), indent=2, ensure_ascii=False), 0)
@@ -461,6 +505,12 @@ def main():
                 )
                 logger.info("Saved %s", save_path)
 
+            if args.infer_every > 0 and optim_step > 0 and optim_step % args.infer_every == 0:
+                logger.info("Running periodic inference at step %d", optim_step)
+                model.eval()
+                run_periodic_inference(args, model, ae, t5, clip, device, dtype, logger, writer, optim_step)
+                model.train()
+
     final_path = output_dir / "mv_adapter_last.pt"
     torch.save(
         {
@@ -490,7 +540,7 @@ def main():
     if not args.no_infer_after_training:
         logger.info("Running end-of-training inference with independent noise")
         model.eval()
-        run_final_inference(args, model, ae, t5, clip, device, dtype, logger)
+        run_sample_inference(args, model, ae, t5, clip, device, dtype, logger)
 
     writer.flush()
     writer.close()
