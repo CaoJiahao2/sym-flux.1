@@ -19,7 +19,85 @@
 
 ---
 
-## 1. 代码结构
+## 目录
+
+- [1. 项目概览](#1-项目概览)
+- [2. 快速开始](#2-快速开始)
+- [3. 常用命令速查（训练/测试）](#3-常用命令速查训练测试)
+- [4. 代码结构](#4-代码结构)
+- [5. 环境准备](#5-环境准备)
+- [6. 准备 FLUX.1-dev 本地权重](#6-准备-flux1-dev-本地权重)
+- [7. 准备 SynCamVideo-Dataset](#7-准备-syncamvideo-dataset)
+- [8. 制作 scene-level captions](#8-制作-scene-level-captions)
+- [9. 构建 manifest](#9-构建-manifest)
+- [10. Config 目录结构](#10-config-目录结构)
+- [11. Config 驱动训练](#11-config-驱动训练)
+- [12. Config 驱动推理/验证](#12-config-驱动推理验证)
+- [13. 周期性推理可视化](#13-周期性推理可视化)
+- [14. 正式训练：三阶段角度 curriculum](#14-正式训练三阶段角度-curriculum)
+- [15. 手动推理验证](#15-手动推理验证)
+- [16. 常见问题](#16-常见问题)
+- [17. 最小完整流程](#17-最小完整流程)
+
+## 1. 项目概览
+## 2. 快速开始
+
+```bash
+# 0) 环境变量
+export LOCAL_FLUX_DIR=/your/path/FLUX.1-dev
+export DATASET_ROOT=/your/path/SynCamVideo-Dataset
+
+# 1) 检查环境
+GPU_IDS=0 bash scripts/00_local_flux_env.sh
+
+# 2) 构建 manifest（示例：4 视角）
+DATASET_ROOT=$DATASET_ROOT NUM_VIEWS=4 bash scripts/full_view/10_build_manifests_full_view_angles.sh
+
+# 3) 快速训练（smoke test）
+GPU_IDS=0 bash scripts/train_with_config.sh configs/train/default.json --max_steps 20 --infer_every 10
+
+# 4) 推理验证
+GPU_IDS=0 bash scripts/infer_with_config.sh configs/val/default.json
+```
+
+## 3. 常用命令速查（训练/测试）
+
+### A. 训练命令（多组）
+
+```bash
+# A1: 默认训练
+GPU_IDS=0 bash scripts/train_with_config.sh configs/train/default.json
+
+# A2: 小规模 smoke 训练（建议先跑）
+GPU_IDS=0 bash scripts/train_with_config.sh   configs/train/default.json   --max_steps 50 --save_every 10 --infer_every 10
+
+# A3: 三阶段 curriculum 一键训练
+GPU_IDS=0 bash scripts/full_view/23_train_all_full_view_stages.sh
+
+# A4: full_hidden 训练（高显存）
+GPU_IDS=0 bash scripts/train_with_config.sh configs/train/full_hidden_stage1_0_30_v4.json
+```
+
+### B. 测试/验证命令（多组）
+
+```bash
+# B1: 数据侧检查（单 scene）
+DATASET_ROOT=data/SynCamVideo-Dataset SPLIT=train SCENE=scene10 FRAME_IDX=80   bash scripts/data_process/check_data.sh
+
+# B2: manifest + dataloader 检查
+MANIFEST=data/samples/stride_8_angle_0-30_v4_train_samples.jsonl RESOLUTION=512 NUM_VIEWS=4   bash scripts/data_process/check_manifest.sh
+
+# B3: 模型前向检查
+GPU_IDS=0 bash scripts/full_view/00_check_forward_full_view.sh
+
+# B4: 推理验证（指定配置）
+GPU_IDS=0 bash scripts/infer_with_config.sh configs/val/full_view_stage1_0_30_v4.json
+
+# B5: 推理验证（覆盖 checkpoint 与输出）
+GPU_IDS=0 bash scripts/infer_with_config.sh   configs/val/full_view_stage1_0_30_v4.json   --mv_ckpt outputs/full_view_stage1_0_30_v4/mv_adapter_last.pt   --sample_index 2   --out outputs/eval/stage1_sample2.jpg
+```
+
+## 4. 代码结构
 
 ```text
 configs/train/                        # 训练配置文件
@@ -43,7 +121,7 @@ scripts/full_view/                    # 推荐使用的一键脚本
 
 ---
 
-## 2. 环境准备
+## 5. 环境准备
 
 建议使用 Python 3.10。
 
@@ -64,7 +142,7 @@ export PYTHONPATH="$(pwd):$(pwd)/src:${PYTHONPATH:-}"
 
 ---
 
-## 3. 准备 FLUX.1-dev 本地权重
+## 6. 准备 FLUX.1-dev 本地权重
 
 默认脚本读取：
 
@@ -102,7 +180,7 @@ GPU_IDS=0 bash scripts/00_local_flux_env.sh
 
 ---
 
-## 4. 准备 SynCamVideo-Dataset
+## 7. 准备 SynCamVideo-Dataset
 
 推荐目录：
 
@@ -140,7 +218,7 @@ bash scripts/data_process/check_data.sh
 
 ---
 
-## 5. 制作 scene-level captions
+## 8. 制作 scene-level captions
 
 如果没有 captions，manifest 会使用 fallback prompt：
 
@@ -183,7 +261,7 @@ bash scripts/full_view/06_caption_scene_qwen.sh
 
 ---
 
-## 6. 构建 manifest
+## 9. 构建 manifest
 
 默认构建三个角度区间：
 
@@ -237,7 +315,7 @@ bash scripts/data_process/check_manifest.sh
 
 ---
 
-## 7. Config 目录结构
+## 10. Config 目录结构
 
 现在 `configs/` 分为两个子目录：
 
@@ -270,7 +348,7 @@ configs/README.md
 
 ---
 
-## 8. Config 驱动训练
+## 11. Config 驱动训练
 
 使用封装脚本：
 
@@ -289,7 +367,7 @@ GPU_IDS=0 bash scripts/train_with_config.sh \
 
 ---
 
-## 9. Config 驱动推理/验证
+## 12. Config 驱动推理/验证
 
 推理入口：
 
@@ -321,7 +399,7 @@ mv_arch, mv_adapter_dim, mv_attn_mode, inject_single_blocks, single_block_stride
 
 ---
 
-## 10. 周期性推理可视化
+## 13. 周期性推理可视化
 
 新增参数：
 
@@ -363,7 +441,7 @@ python src/train_flux_multiview.py \
 
 ---
 
-## 11. 正式训练：三阶段角度 curriculum
+## 14. 正式训练：三阶段角度 curriculum
 
 ### 10.1 阶段一：[0,30]
 
@@ -435,7 +513,7 @@ GPU_IDS=0 bash scripts/full_view/23_train_all_full_view_stages.sh \
 
 ---
 
-## 12. 训练参数如何配置
+## 15. 训练参数如何配置
 
 现在主要参数都应该写在 config 中，而不是写在 shell 脚本里。重点参数如下：
 
@@ -476,7 +554,7 @@ GPU_IDS=0 bash scripts/train_with_config.sh configs/train/my_experiment.json
 
 ---
 
-## 13. full_hidden 版本训练
+## 16. full_hidden 版本训练
 
 默认推荐：
 
@@ -529,7 +607,7 @@ cp configs/train/full_view_stage1_0_30_v4.json configs/train/full_hidden_stage1_
 
 ---
 
-## 14. 训练日志与输出
+## 17. 训练日志与输出
 
 每次训练的 `output_dir` 中会保存：
 
@@ -586,7 +664,7 @@ GPU_IDS=0 bash scripts/infer_with_config.sh \
 
 ---
 
-## 16. 推荐消融实验
+## 19. 推荐消融实验
 
 至少比较：
 
@@ -610,7 +688,7 @@ GPU_IDS=0 bash scripts/infer_with_config.sh \
 
 ---
 
-## 17. 常见问题
+## 20. 常见问题
 
 ### Q1：`train.log` 有 loss，但多视角图像很不一致
 
@@ -670,7 +748,7 @@ bash scripts/full_view/20_train_full_view_0_30.sh --infer_every 1000 --infer_num
 
 ---
 
-## 18. 最小完整流程
+## 21. 最小完整流程
 
 ```bash
 # 1. 数据预览
