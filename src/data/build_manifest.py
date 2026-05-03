@@ -72,15 +72,25 @@ def select_views(
     rng: random.Random,
     sampling: str,
 ) -> List[str] | None:
-    """Select a camera group from the available cameras."""
+    """Select a camera group from the available cameras.
+
+    Important: do not sort valid combinations by angle before selecting one.
+    The previous deterministic ``first`` mode sorted by ``(angle, cams)`` and
+    therefore always picked the smallest valid angle, which heavily biased
+    manifests toward near-identical views inside every angle bucket.
+
+    Modes:
+      - random: uniformly sample one valid camera combination. Recommended and
+        used by default.
+      - first: deterministic first valid combination in camera-name order. This
+        is kept for debugging only and no longer means "minimum angle".
+    """
     if num_views <= 0 or num_views >= len(all_cams):
         return list(all_cams)
 
-    combos = list(itertools.combinations(all_cams, num_views))
-    if sampling == "random":
-        rng.shuffle(combos)
+    combos = itertools.combinations(all_cams, num_views)
+    valid: List[tuple[float, List[str]]] = []
 
-    valid = []
     for combo in combos:
         mats = [all_mats[c] for c in combo]
         angle = max_pairwise_rotation_angle_deg(mats)
@@ -88,16 +98,19 @@ def select_views(
             continue
         if max_angle is not None and angle > max_angle:
             continue
-        valid.append((angle, list(combo)))
+
+        selected = list(combo)
+        if sampling == "first":
+            return selected
+        valid.append((angle, selected))
 
     if not valid:
         return None
 
-    if sampling == "first":
-        valid.sort(key=lambda x: (x[0], x[1]))
-        return valid[0][1]
+    if sampling == "random":
+        return rng.choice(valid)[1]
 
-    return valid[0][1]
+    raise ValueError(f"Unsupported sampling mode: {sampling}")
 
 
 def build_manifest(args: argparse.Namespace) -> None:
@@ -215,7 +228,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cams", type=str, default="", help="Optional comma list, e.g. cam01,cam02,...")
     parser.add_argument("--min_angle", type=float, default=None, help="Optional min pairwise rotation angle in degrees")
     parser.add_argument("--max_angle", type=float, default=None, help="Optional max pairwise rotation angle in degrees")
-    parser.add_argument("--sampling", type=str, default="first", choices=["first", "random"])
+    parser.add_argument("--sampling", type=str, default="random", choices=["first", "random"])
     parser.add_argument("--seed", type=int, default=1234)
     return parser.parse_args()
 

@@ -303,8 +303,7 @@ def main():
 
     with open(output_dir / "args.json", "w", encoding="utf-8") as f:
         json.dump(vars(args), f, indent=2, ensure_ascii=False)
-    with open(output_dir / "hparams.json", "w", encoding="utf-8") as f:
-        json.dump(vars(args), f, indent=2, ensure_ascii=False)
+
     if getattr(args, "config_data", None):
         with open(output_dir / "config_snapshot.json", "w", encoding="utf-8") as f:
             json.dump(args.config_data, f, indent=2, ensure_ascii=False)
@@ -376,6 +375,19 @@ def main():
         collate_fn=collate_fn,
     )
     logger.info("Dataset samples=%d manifest=%s", len(dataset), args.train_manifest)
+
+    # Fail fast instead of entering the outer while-loop forever when the
+    # manifest is empty or drop_last=True removes the only incomplete batch.
+    if len(dataset) == 0:
+        raise ValueError(
+            f"Empty training dataset. Check --train_manifest and manifest generation: {args.train_manifest}"
+        )
+    if len(loader) == 0:
+        raise ValueError(
+            "Training DataLoader has zero batches. "
+            f"Dataset samples={len(dataset)}, batch_size={args.batch_size}, drop_last=True. "
+            "Reduce --batch_size, add more samples, or change the DataLoader drop_last policy."
+        )
 
     optimizer = torch.optim.AdamW(
         list(model.trainable_parameters()),

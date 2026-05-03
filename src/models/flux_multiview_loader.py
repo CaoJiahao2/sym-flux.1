@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+from typing import Any
 
 import torch
 from huggingface_hub import hf_hub_download
@@ -64,6 +66,117 @@ def resolve_flux_checkpoint(name: str = "flux-dev", hf_download: bool = False) -
     )
 
 
+def _load_sidecar_args(mv_ckpt: str | os.PathLike[str]) -> dict[str, Any]:
+    """Load args.json from the checkpoint directory and fail hard if absent."""
+    ckpt_path = Path(mv_ckpt)
+    args_path = ckpt_path.parent / "args.json"
+    if not args_path.is_file():
+        raise FileNotFoundError(
+            f"Required sidecar args file not found: {args_path}. "
+            "For safety, MVS checkpoints must be loaded together with the args.json "
+            "saved in the same output directory."
+        )
+    with args_path.open("r", encoding="utf-8") as f:
+        obj = json.load(f)
+    if not isinstance(obj, dict):
+        raise TypeError(f"Expected {args_path} to contain a JSON object, got {type(obj).__name__}")
+    return obj
+
+
+def _same_bool(a: Any, b: Any) -> bool:
+    return bool(a) == bool(b)
+
+
+def _assert_architecture_matches_checkpoint(
+    *,
+    sidecar_args: dict[str, Any],
+    name: str,
+    mv_adapter_dim: int,
+    mv_dropout: float,
+    inject_single_blocks: bool,
+    single_block_stride: int,
+    mv_attn_mode: str,
+    mv_use_timestep_modulation: bool,
+    mv_arch: str,
+    mv_ckpt: str | os.PathLike[str],
+) -> None:
+    """Ensure the runtime MVS architecture exactly matches the saved checkpoint.
+
+    The source of truth is ``args.json`` in the checkpoint directory, not the
+    checkpoint payload, because that file is written once at run start and is
+    easier to inspect/version alongside training artifacts.
+    """
+    expected = {
+        "model_name": name,
+        "mv_arch": mv_arch,
+        "mv_attn_mode": mv_attn_mode,
+        "inject_single_blocks": inject_single_blocks,
+        "single_block_stride": single_block_stride,
+        "mv_dropout": mv_dropout,
+        "no_mv_timestep_modulation": not mv_use_timestep_modulation,
+    }
+    if mv_arch == "adapter":
+        expected["mv_adapter_dim"] = mv_adapter_dim
+
+    mismatches: list[str] = []
+    missing: list[str] = []
+    for key, current_value in expected.items():
+        if key not in sidecar_args:
+            missing.append(key)
+            continue
+        saved_value = sidecar_args[key]
+        if isinstance(current_value, bool):
+            ok = _same_bool(saved_value, current_value)
+        elif isinstance(current_value, float):
+            try:
+                ok = abs(float(saved_value) - current_value) <= 1e-12
+            except (TypeError, ValueError):
+                ok = False
+        elif isinstance(current_value, int):
+            try:
+                ok = int(saved_value) == current_value
+            except (TypeError, ValueError):
+                ok = False
+        else:
+            ok = str(saved_value) == str(current_value)
+        if not ok:
+            mismatches.append(f"{key}: checkpoint args={saved_value!r}, runtime={current_value!r}")
+
+    if missing or mismatches:
+        details = []
+        if missing:
+            details.append("missing required key(s) in sidecar args.json: " + ", ".join(missing))
+        if mismatches:
+            details.append("architecture mismatch(s):\n  - " + "\n  - ".join(mismatches))
+        raise ValueError(
+            f"Refusing to load incompatible MVS checkpoint: {mv_ckpt}\n"
+            + "\n".join(details)
+        )
+
+
+def _assert_mv_state_dict_exact(model: FluxMultiView, mv_sd: dict[str, torch.Tensor], mv_ckpt: str | os.PathLike[str]) -> None:
+    """Require the saved adapter keys to match the current MVS module exactly."""
+    expected_keys = {
+        k for k in model.state_dict().keys()
+        if k.startswith("mv_double_blocks") or k.startswith("mv_single_blocks")
+    }
+    saved_keys = set(mv_sd.keys())
+    missing = sorted(expected_keys - saved_keys)
+    unexpected = sorted(saved_keys - expected_keys)
+    if missing or unexpected:
+        def preview(keys: list[str], limit: int = 20) -> str:
+            if not keys:
+                return "none"
+            suffix = "" if len(keys) <= limit else f" ... (+{len(keys) - limit} more)"
+            return ", ".join(keys[:limit]) + suffix
+
+        raise RuntimeError(
+            f"MVS checkpoint key set does not exactly match current architecture: {mv_ckpt}\n"
+            f"Missing MVS keys: {preview(missing)}\n"
+            f"Unexpected MVS keys: {preview(unexpected)}"
+        )
+
+
 def load_multiview_flux(
     name: str = "flux-dev",
     device: str | torch.device = "cuda",
@@ -108,11 +221,36 @@ def load_multiview_flux(
         print(f"Initialized full-hidden MVS attention from base img_attn: {init_info}")
 
     if mv_ckpt:
+        sidecar_args = _load_sidecar_args(mv_ckpt)
+        _assert_architecture_matches_checkpoint(
+            sidecar_args=sidecar_args,
+            name=name,
+            mv_adapter_dim=mv_adapter_dim,
+            mv_dropout=mv_dropout,
+            inject_single_blocks=inject_single_blocks,
+            single_block_stride=single_block_stride,
+            mv_attn_mode=mv_attn_mode,
+            mv_use_timestep_modulation=mv_use_timestep_modulation,
+            mv_arch=mv_arch,
+            mv_ckpt=mv_ckpt,
+        )
+
         print(f"Loading multi-view adapter checkpoint: {mv_ckpt}")
         obj = torch.load(mv_ckpt, map_location="cpu")
         mv_sd = obj.get("state_dict", obj)
+        if not isinstance(mv_sd, dict):
+            raise TypeError(f"Checkpoint state_dict must be a dict, got {type(mv_sd).__name__}: {mv_ckpt}")
+        _assert_mv_state_dict_exact(model, mv_sd, mv_ckpt)
+        # strict=False is used only because mv_sd intentionally contains MVS keys
+        # and omits all frozen base FLUX keys. The MVS key set was already checked
+        # exactly above, so this will still fail on tensor-shape incompatibilities.
         missing, unexpected = model.load_state_dict(mv_sd, strict=False)
-        print_load_warning(missing, unexpected)
+        mv_missing = [k for k in missing if k.startswith("mv_double_blocks") or k.startswith("mv_single_blocks")]
+        mv_unexpected = [k for k in unexpected if k.startswith("mv_double_blocks") or k.startswith("mv_single_blocks")]
+        if mv_missing or mv_unexpected:
+            raise RuntimeError(
+                f"Unexpected MVS load result for {mv_ckpt}: missing={mv_missing}, unexpected={mv_unexpected}"
+            )
 
     model.to(device)
     return model
