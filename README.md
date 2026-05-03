@@ -249,13 +249,13 @@ configs/val/      # 推理/验证配置，供 infer_flux_multiview.py 使用
 推荐配置：
 
 ```text
-configs/train/debug_v2_100steps.json              # 2 视角、100 step 冒烟测试
+configs/train/default.json              # 默认配置
 configs/train/full_view_stage1_0_30_v4.json       # 4 视角，[0,30]
 configs/train/full_view_stage2_15_45_v4.json      # 4 视角，[15,45]，从 stage1 继续
 configs/train/full_view_stage3_30_60_v4.json      # 4 视角，[30,60]，从 stage2 继续
 configs/train/ablation_same_token_stage1_v4.json  # same_token 消融实验
 
-configs/val/debug_v2_100steps.json                # debug checkpoint 推理
+configs/val/default.json                # 默认配置
 configs/val/full_view_stage1_0_30_v4.json         # stage1 checkpoint 推理
 configs/val/full_view_stage2_15_45_v4.json        # stage2 checkpoint 推理
 configs/val/full_view_stage3_30_60_v4.json        # stage3 checkpoint 推理
@@ -275,14 +275,14 @@ configs/README.md
 使用封装脚本：
 
 ```bash
-GPU_IDS=0 bash scripts/train_with_config.sh configs/train/full_view_stage1_0_30_v4.json
+GPU_IDS=0 bash scripts/train_with_config.sh configs/train/default.json
 ```
 
 命令行参数会覆盖 config 文件中的同名字段：
 
 ```bash
 GPU_IDS=0 bash scripts/train_with_config.sh \
-  configs/train/full_view_stage1_0_30_v4.json \
+  configs/train/default.json \
   --max_steps 2000 \
   --infer_every 250
 ```
@@ -294,20 +294,20 @@ GPU_IDS=0 bash scripts/train_with_config.sh \
 推理入口：
 
 ```bash
-python src/infer_flux_multiview.py --config configs/val/full_view_stage3_30_60_v4.json
+python src/infer_flux_multiview.py --config configs/val/default.json
 ```
 
 或使用封装脚本：
 
 ```bash
-GPU_IDS=0 bash scripts/infer_with_config.sh configs/val/full_view_stage3_30_60_v4.json
+GPU_IDS=0 bash scripts/infer_with_config.sh configs/val/default.json
 ```
 
 命令行参数同样可以覆盖 config，例如换验证样本和输出路径：
 
 ```bash
 GPU_IDS=0 bash scripts/infer_with_config.sh \
-  configs/val/full_view_stage3_30_60_v4.json \
+  configs/val/default.json \
   --sample_index 3 \
   --out outputs/eval/stage3_sample3.jpg
 ```
@@ -698,7 +698,7 @@ GPU_IDS=0 bash scripts/full_view/00_check_forward_full_view.sh
 
 # 5. smoke training
 GPU_IDS=0 bash scripts/train_with_config.sh \
-  configs/train/debug_v2_100steps.json \
+  configs/train/default.json \
   --max_steps 20 \
   --save_every 10 \
   --infer_every 10
