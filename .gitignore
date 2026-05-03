@@ -233,5 +233,5 @@ outputs/
 test/album
 data/SynCamVideo-Dataset
 data/scene_previews
-*.json
-*.jsonl
+data/captions
+data/samples

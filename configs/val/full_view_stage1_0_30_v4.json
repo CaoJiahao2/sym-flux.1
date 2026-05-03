@@ -1,0 +1,20 @@
+{
+  "model_name": "flux-dev",
+  "mv_ckpt": "outputs/full_view_stage1_0_30_v4/mv_adapter_last.pt",
+  "manifest": "data/samples/stride_8_angle_0-30_v4_val_samples.jsonl",
+  "sample_index": 0,
+  "num_views": 4,
+  "height": 512,
+  "width": 512,
+  "num_steps": 30,
+  "guidance": 3.5,
+  "seed": 42,
+  "mv_arch": "adapter",
+  "mv_adapter_dim": 512,
+  "mv_attn_mode": "full_view",
+  "no_mv_timestep_modulation": false,
+  "inject_single_blocks": true,
+  "single_block_stride": 3,
+  "hf_download": false,
+  "out": "outputs/full_view_stage1_0_30_v4/manual_inference.jpg"
+}
