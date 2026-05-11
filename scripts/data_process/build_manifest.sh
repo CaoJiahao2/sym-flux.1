@@ -3,5 +3,9 @@
 
 # Progressive manifest examples.
 FRAME_STRIDE=10 MIN_ANGLE=0  MAX_ANGLE=30 NUM_VIEWS=2 SAMPLING=random bash scripts/01_build_manifest.sh
+FRAME_STRIDE=10 MIN_ANGLE=15 MAX_ANGLE=45 NUM_VIEWS=2 SAMPLING=random bash scripts/01_build_manifest.sh
+FRAME_STRIDE=10 MIN_ANGLE=30 MAX_ANGLE=60 NUM_VIEWS=2 SAMPLING=random bash scripts/01_build_manifest.sh
+
+FRAME_STRIDE=10 MIN_ANGLE=0  MAX_ANGLE=30 NUM_VIEWS=4 SAMPLING=random bash scripts/01_build_manifest.sh
+FRAME_STRIDE=10 MIN_ANGLE=15 MAX_ANGLE=45 NUM_VIEWS=4 SAMPLING=random bash scripts/01_build_manifest.sh
 FRAME_STRIDE=10 MIN_ANGLE=30 MAX_ANGLE=60 NUM_VIEWS=4 SAMPLING=random bash scripts/01_build_manifest.sh
-FRAME_STRIDE=10 MIN_ANGLE=60 MAX_ANGLE=90 NUM_VIEWS=4 SAMPLING=random bash scripts/01_build_manifest.sh

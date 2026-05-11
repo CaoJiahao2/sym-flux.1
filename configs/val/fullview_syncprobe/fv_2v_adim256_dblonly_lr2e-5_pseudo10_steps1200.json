@@ -1,0 +1,21 @@
+{
+  "model_name": "flux-dev",
+  "mv_ckpt": "outputs/fullview_syncprobe/fv_2v_adim256_dblonly_lr2e-5_pseudo10_steps1200/mv_adapter_last.pt",
+  "manifest": "data/samples/stride_8_angle_0-30_v2_val_samples.jsonl",
+  "sample_index": 0,
+  "num_views": 2,
+  "height": 512,
+  "width": 512,
+  "num_steps": 40,
+  "guidance": 3.5,
+  "seed": 42,
+  "mv_arch": "adapter",
+  "mv_adapter_dim": 256,
+  "mv_attn_mode": "full_view",
+  "mv_dropout": 0.0,
+  "no_mv_timestep_modulation": false,
+  "inject_single_blocks": false,
+  "single_block_stride": 999,
+  "hf_download": false,
+  "out": "outputs/fullview_syncprobe/fv_2v_adim256_dblonly_lr2e-5_pseudo10_steps1200/infer_sample0_steps40.jpg"
+}
